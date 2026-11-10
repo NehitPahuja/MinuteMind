@@ -22,6 +22,7 @@ from fastapi import (
     WebSocketException,
     status,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
@@ -33,6 +34,11 @@ from minutemind.session import RecordingError, RecordingSession
 log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-MinuteMind-Token"
+
+# In development the UI is served by Vite from http://localhost:<port>, a
+# different origin from this service, so the browser sends CORS preflight
+# requests. Only local origins are allowed, and the token is still required.
+LOCAL_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 LEVELS_INTERVAL_S = 0.08
 
 
@@ -79,6 +85,14 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+    )
+    # Preflight (OPTIONS) requests carry no token; this middleware answers them
+    # before the token check runs.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=LOCAL_ORIGIN_REGEX,
+        allow_methods=["*"],
+        allow_headers=[TOKEN_HEADER, "Content-Type"],
     )
 
     def get_session() -> RecordingSession:

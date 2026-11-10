@@ -54,7 +54,7 @@ Still to do by hand: record a real call or a YouTube clip with the AirPods or sp
 
 ## Testing
 
-- **Backend:** `cd backend && uv run pytest` (29 tests). A `FakeRecorder` in `tests/conftest.py` stands in for audio hardware.
+- **Backend:** `cd backend && uv run pytest` (32 tests, one of them needs real audio devices and skips without them). A `FakeRecorder` in `tests/conftest.py` stands in for audio hardware.
 - **App:** `cd app && npm run typecheck && npm run lint && npm run build`.
 - **UI screenshots and scripted runs**, after `npm run build`, in `app/`:
   - Every page: `MINUTEMIND_SCREENSHOT_DIR=<folder> npx electron .`
@@ -65,5 +65,5 @@ Still to do by hand: record a real call or a YouTube clip with the AirPods or sp
 ## Known issues
 
 - On this machine, `netstat` and `Get-NetTCPConnection` do not list the backend's listening socket even while it serves requests. To check the backend, read the `[minutemind] backend {...}` status line the main process logs, or call `/health` on the logged port.
-- Observed once, not reproduced: in a scripted run, the meeting list stayed on "Loading…", device loading failed with "Failed to fetch", and the status pill later showed "Engine starting". A leftover MinuteMind window from an earlier test was still open at the time. After closing it, the same run passed three times in a row. If it recurs, capture the full Electron log, including `[backend]` stderr lines.
+- **Fixed after Phase 1 shipped:** "Failed to fetch" under the device pickers in `npm run dev` had two causes. (1) In dev the UI is served from `http://localhost:5173`, a different origin from the backend, and the backend had no CORS rules, so the browser blocked every request. `api.py` now allows `localhost` and `127.0.0.1` origins only, and the token is still required. (2) React StrictMode runs effects twice in dev, so devices were listed twice at once, and concurrent PortAudio calls crash the backend with `0xC0000005` (access violation). All PortAudio setup, listing and teardown now goes through `capture.PORTAUDIO_LOCK`, with a regression test in `tests/test_hardware.py`. **Test in dev mode too**: `npx electron-vite dev` honours the same screenshot and recording environment variables as `npx electron .`.
 - When checking for backend processes, filter on `Name = 'python.exe'`. Searching command lines for "minutemind" also matches the search command itself.
