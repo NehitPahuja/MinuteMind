@@ -33,6 +33,8 @@ Read this first in every new session, then [docs/PLAN.md](docs/PLAN.md). Update 
 - **Dev launch:** Electron runs `backend/.venv/Scripts/python.exe` directly and falls back to `uv run` if the venv doesn't exist yet.
 - **Renderer to backend:** the renderer gets `{ baseUrl, token }` from `window.api.backend.getConnection()` and calls the backend directly. The CSP allows `http://127.0.0.1:*` and `ws://127.0.0.1:*`.
 - Shared TypeScript types live in `app/src/shared/` and are importable as `@shared/...` in the renderer.
+- **Design system ("ink and paper"):** tokens live in `app/src/renderer/src/assets/main.css` under `@theme`. Fonts are bundled through Fontsource, not loaded from Google, so the app works offline. Fraunces is for headings (`.display`), Geist for UI text, and Geist Mono for timestamps, labels (`.eyebrow`) and status. Signal red-orange is reserved for recording, marker yellow (`.marker`) for highlights, search hits and citations, and sage for healthy status. The main canvas uses `.ruled` notebook lines.
+- **UI screenshots without a browser:** after `npm run build`, run `MINUTEMIND_SCREENSHOT_DIR=<folder> npx electron .` in `app/`. The app saves a PNG of each page and quits. Add new pages to the list in `app/src/main/devScreenshots.ts`.
 
 ## Known issues
 

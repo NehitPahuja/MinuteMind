@@ -1,33 +1,38 @@
 import type { BackendStatus } from '@shared/backend'
 
-const STYLES = {
-  starting: { dot: 'bg-amber-400 animate-pulse', label: 'Starting backend…' },
-  ready: { dot: 'bg-emerald-400', label: 'Backend connected' },
-  error: { dot: 'bg-rose-500', label: 'Backend error' }
+const STATES = {
+  starting: { dot: 'bg-amber animate-pulse', label: 'Engine starting' },
+  ready: { dot: 'bg-sage', label: 'Engine ready' },
+  error: { dot: 'bg-signal', label: 'Engine stopped' }
 } as const
 
 export function BackendStatusPill({ status }: { status: BackendStatus }): React.JSX.Element {
-  const style = STYLES[status.state]
+  const state = STATES[status.state]
   return (
     <div className="space-y-2">
-      <div
-        className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300"
-        role="status"
-        title={status.state === 'ready' ? `v${status.version} on port ${status.port}` : undefined}
-      >
-        <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} aria-hidden="true" />
-        {style.label}
+      <div className="px-2" role="status">
+        <div className="flex items-center gap-2.5">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${state.dot}`} aria-hidden="true" />
+          <span className="whitespace-nowrap font-mono text-[11px] tracking-wide text-paper-300">
+            {state.label}
+          </span>
+        </div>
+        {status.state === 'ready' && (
+          <p className="mt-1 whitespace-nowrap pl-4 font-mono text-[10px] text-paper-700">
+            v{status.version} · port {status.port}
+          </p>
+        )}
       </div>
 
       {status.state === 'error' && (
-        <div className="space-y-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-xs text-rose-200">
-          <p className="break-words">{status.message}</p>
+        <div className="space-y-2 rounded-md border border-signal/30 bg-signal-soft p-3 text-xs text-paper-100">
+          <p className="break-words leading-relaxed">{status.message}</p>
           <button
             type="button"
             onClick={() => void window.api.backend.restart()}
-            className="rounded-md bg-rose-500/20 px-2 py-1 font-medium hover:bg-rose-500/30"
+            className="font-mono text-[11px] uppercase tracking-wider text-signal hover:text-paper-50"
           >
-            Retry
+            Restart engine →
           </button>
         </div>
       )}

@@ -1,20 +1,122 @@
+@import '@fontsource-variable/fraunces/full.css';
+@import '@fontsource-variable/fraunces/full-italic.css';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
 @import 'tailwindcss';
 
-html,
-body,
-#root {
-  height: 100%;
+/*
+ * MinuteMind design tokens: "ink and paper".
+ * A warm, low-glare dark notebook. Red-orange is reserved for recording,
+ * highlighter yellow for search hits and citations, sage for healthy status.
+ */
+@theme {
+  --font-display: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
+  --font-sans: 'Geist Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, Consolas, monospace;
+
+  --color-ink-950: #12100d;
+  --color-ink-900: #191612;
+  --color-ink-850: #1f1b17;
+  --color-ink-800: #26221d;
+  --color-line: #332d26;
+  --color-line-strong: #463e35;
+
+  --color-paper-50: #f5efe4;
+  --color-paper-100: #ebe3d5;
+  --color-paper-300: #bdb2a1;
+  --color-paper-500: #857b6c;
+  --color-paper-700: #5c544a;
+
+  --color-signal: #ff5b3a;
+  --color-signal-soft: #ff5b3a26;
+  --color-marker: #f2c94c;
+  --color-marker-soft: #f2c94c2e;
+  --color-sage: #9cc28a;
+  --color-amber: #e8a53d;
+
+  --animate-rec-pulse: rec-pulse 1.6s ease-in-out infinite;
 }
 
-body {
-  margin: 0;
-  background: #0b0d17;
-  color-scheme: dark;
-  font-family:
-    Inter,
-    'Segoe UI',
-    system-ui,
-    -apple-system,
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
+@keyframes rec-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--color-signal-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ink-950);
+    color: var(--color-paper-100);
+    color-scheme: dark;
+    font-family: var(--font-sans);
+    font-feature-settings: 'ss01', 'cv11';
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: var(--color-marker-soft);
+    color: var(--color-paper-50);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-marker);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* Faint ruled-notebook lines behind the main canvas. */
+  .ruled {
+    background-color: var(--color-ink-950);
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 31px,
+      color-mix(in oklab, var(--color-line) 55%, transparent) 31px,
+      color-mix(in oklab, var(--color-line) 55%, transparent) 32px
+    );
+  }
+
+  /* Highlighter stroke, slightly uneven like a real marker. */
+  .marker {
+    background-image: linear-gradient(
+      100deg,
+      transparent 0.2em,
+      var(--color-marker-soft) 0.35em,
+      color-mix(in oklab, var(--color-marker) 30%, transparent) 60%,
+      var(--color-marker-soft) calc(100% - 0.3em),
+      transparent calc(100% - 0.15em)
+    );
+    background-repeat: no-repeat;
+    background-size: 100% 0.55em;
+    background-position: 0 88%;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-paper-500);
+  }
+
+  .display {
+    font-family: var(--font-display);
+    font-variation-settings:
+      'opsz' 144,
+      'SOFT' 50,
+      'WONK' 1;
+    letter-spacing: -0.02em;
+  }
 }
