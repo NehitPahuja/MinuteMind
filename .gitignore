@@ -1,0 +1,27 @@
+# Node / Electron
+node_modules/
+app/out/
+app/dist/
+*.log*
+.eslintcache
+
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local data, recordings and models (live in %APPDATA%\MinuteMind, never in the repo)
+*.wav
+*.gguf
+models/
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
