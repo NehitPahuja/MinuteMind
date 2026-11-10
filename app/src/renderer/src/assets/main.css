@@ -61,18 +61,6 @@
 }
 
 @layer components {
-  /* Faint ruled-notebook lines behind the main canvas. */
-  .ruled {
-    background-color: var(--color-ink-950);
-    background-image: repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent 31px,
-      color-mix(in oklab, var(--color-line) 45%, transparent) 31px,
-      color-mix(in oklab, var(--color-line) 45%, transparent) 32px
-    );
-  }
-
   .eyebrow {
     font-family: var(--font-mono);
     font-size: 0.6875rem;
