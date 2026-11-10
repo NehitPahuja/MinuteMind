@@ -192,8 +192,6 @@ export function RecordPage({
                 onChange={setSystemId}
                 allOption={
                   devices && devices.loopbacks.length > 0 ? 'All outputs (recommended)' : undefined
-                })`
-                    : undefined
                 }
               />
               <div className="flex items-center justify-between">
