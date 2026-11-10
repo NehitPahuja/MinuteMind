@@ -12,6 +12,7 @@ import asyncio
 import logging
 import secrets
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import (
     Depends,
@@ -45,7 +46,8 @@ LEVELS_INTERVAL_S = 0.08
 class StartRecording(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     mic_device_id: int | None = None
-    system_device_id: int | None = None
+    # A loopback device id, "all" to record every output device, or null.
+    system_device_id: int | Literal["all"] | None = None
 
 
 class RenameMeeting(BaseModel):

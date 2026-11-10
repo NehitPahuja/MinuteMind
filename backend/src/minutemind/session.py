@@ -11,6 +11,9 @@ from typing import Callable
 from minutemind import audio_files, paths, store
 from minutemind.capture import AudioDevice, Recorder, list_devices
 
+# Pass as the system source to record every output device's sound at once.
+ALL_OUTPUTS = "all"
+
 log = logging.getLogger(__name__)
 
 IDLE = "idle"
@@ -45,21 +48,28 @@ class RecordingSession:
         self,
         title: str | None,
         mic_id: int | None,
-        system_id: int | None,
+        system_id: int | str | None,
     ) -> store.Meeting:
+        """Start recording. `system_id` is a loopback device id, ALL_OUTPUTS
+        to capture every output device, or None for no PC sound."""
         with self._lock:
             if self._active is not None:
                 raise RecordingError("A recording is already in progress")
             devices = self._list_devices()
             mic = _pick(devices["inputs"], mic_id) if mic_id is not None else None
-            system = _pick(devices["loopbacks"], system_id) if system_id is not None else None
-            if mic is None and system is None:
+            if system_id is None:
+                system: list[AudioDevice] = []
+            elif system_id == ALL_OUTPUTS:
+                system = list(devices["loopbacks"])
+            else:
+                system = [_pick(devices["loopbacks"], int(system_id))]
+            if mic is None and not system:
                 raise RecordingError("Choose a microphone, PC sound, or both")
 
             meeting = self.db.create_meeting(
                 title=(title or "").strip() or _default_title(),
                 mic_device=mic.name if mic else None,
-                system_device=system.name if system else None,
+                system_device=_describe_outputs(system, system_id == ALL_OUTPUTS),
             )
             recorder = self._recorder_factory(paths.meeting_dir(meeting.id), mic, system)
             try:
@@ -67,6 +77,15 @@ class RecordingSession:
             except Exception as exc:
                 self.db.finish_meeting(meeting.id, 0, status=store.FAILED)
                 raise RecordingError(f"Couldn't open the audio device: {exc}") from exc
+            # Some outputs may have failed to open; record what is really captured.
+            opened = recorder.system_devices
+            if len(opened) != len(system):
+                self.db.set_devices(
+                    meeting.id,
+                    mic_device=meeting.mic_device,
+                    system_device=_describe_outputs(opened, system_id == ALL_OUTPUTS),
+                )
+                meeting = self.db.get_meeting(meeting.id) or meeting
             self._active = _Active(meeting, recorder)
             return meeting
 
@@ -132,6 +151,9 @@ class RecordingSession:
         recovered = []
         for meeting in self.db.active_meetings():
             directory = paths.meeting_dir(meeting.id)
+            for part in directory.glob(audio_files.SYSTEM_PART_GLOB):
+                audio_files.repair_header(part)
+            audio_files.combine_system_parts(directory)
             tracks = [directory / audio_files.MIC_FILE, directory / audio_files.SYSTEM_FILE]
             present = [t for t in tracks if t.exists()]
             for track in present:
@@ -161,6 +183,13 @@ def _pick(devices: list[AudioDevice], device_id: int) -> AudioDevice:
         if device.id == device_id:
             return device
     raise RecordingError("That audio device is no longer available. Refresh the device list.")
+
+
+def _describe_outputs(devices: list[AudioDevice], all_outputs: bool) -> str | None:
+    if not devices:
+        return None
+    names = ", ".join(d.name for d in devices)
+    return f"All outputs ({names})" if all_outputs else names
 
 
 def _default_title() -> str:

@@ -109,9 +109,13 @@ class TrackWriter:
         target_in = int(round(end_s * self.in_rate))
         if target_in > self._in_frames:
             self._resample(np.zeros(target_in - self._in_frames, dtype=np.float32))
-        self._write_frames(
-            self._resampler.resample_chunk(np.zeros(0, dtype=np.float32), last=True)
-        )
+        tail = self._resampler.resample_chunk(np.zeros(0, dtype=np.float32), last=True)
+        # Trim or pad so every track of a meeting ends at exactly the same sample.
+        target_out = int(round(end_s * audio_files.SAMPLE_RATE))
+        room = max(0, target_out - self.frames_written)
+        self._write_frames(tail[:room])
+        if self.frames_written < target_out:
+            self._write_frames(np.zeros(target_out - self.frames_written, dtype=np.float32))
         self._writer.close()
 
     def _resample(self, mono: np.ndarray) -> None:
@@ -215,16 +219,37 @@ class _Track:
 
 
 class Recorder:
-    """Records one meeting: a mic track and/or a PC-sound track."""
+    """Records one meeting: a mic track and/or a PC-sound track.
 
-    def __init__(self, directory: Path, mic: AudioDevice | None, system: AudioDevice | None):
-        if mic is None and system is None:
+    PC sound can come from several output devices at once (each one's
+    loopback); they are combined into a single "system" track at the end, so
+    sound is captured whichever output an app happens to play through.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        mic: AudioDevice | None,
+        system: list[AudioDevice],
+    ):
+        if mic is None and not system:
             raise ValueError("Choose at least one source to record")
         self.directory = directory
         self.clock = ActiveClock()
         self._pa = None
         self._tracks: list[_Track] = []
-        self._requested = {"mic": mic, "system": system}
+        self._mic = mic
+        self._system = list(system)
+        self.warnings: list[str] = []
+
+    @property
+    def has_mic(self) -> bool:
+        return any(t.kind == "mic" for t in self._tracks)
+
+    @property
+    def system_devices(self) -> list[AudioDevice]:
+        """The output devices actually being recorded (some may have failed to open)."""
+        return [t.device for t in self._tracks if t.kind == "system"]
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -233,32 +258,20 @@ class Recorder:
             self._start_locked()
 
     def _start_locked(self) -> None:
-        import pyaudiowpatch as pa
-
-        self._pa = pa.PyAudio()
-        files = {"mic": audio_files.MIC_FILE, "system": audio_files.SYSTEM_FILE}
-        for kind, device in self._requested.items():
-            if device is None:
-                continue
-            track = _Track(kind, device, TrackWriter(self.directory / files[kind], device.rate))
-            self._tracks.append(track)
-
+        self._pa = self._open_portaudio()
         self.clock.start()
         try:
-            for track in self._tracks:
-                track.thread = threading.Thread(
-                    target=self._drain, args=(track,), name=f"writer-{track.kind}", daemon=True
-                )
-                track.thread.start()
-                track.stream = self._pa.open(
-                    format=pa.paFloat32,
-                    channels=track.device.channels,
-                    rate=track.device.rate,
-                    input=True,
-                    input_device_index=track.device.id,
-                    frames_per_buffer=track.device.rate // 20,  # 50 ms
-                    stream_callback=self._make_callback(track),
-                )
+            if self._mic is not None:
+                # The user's own voice is essential: if the mic can't open, fail.
+                self._open_track("mic", self._mic, audio_files.MIC_FILE)
+            for index, device in enumerate(self._system):
+                try:
+                    self._open_track("system", device, audio_files.system_part_file(index))
+                except Exception as exc:  # noqa: BLE001 - other outputs can still record
+                    self.warnings.append(f"Couldn't record {device.name}: {exc}")
+                    log.warning("Skipping loopback %s: %s", device.name, exc)
+            if not self._tracks:
+                raise RuntimeError("None of the chosen audio devices could be opened")
         except Exception:
             self.stop()
             raise
@@ -281,7 +294,7 @@ class Recorder:
                         stream.stop_stream()  # type: ignore[attr-defined]
                         stream.close()  # type: ignore[attr-defined]
                     except Exception:  # noqa: BLE001 - best effort during shutdown
-                        log.exception("Closing %s stream failed", track.kind)
+                        log.exception("Closing %s stream failed", track.device.name)
         for track in self._tracks:
             track.queue.put(None)  # sentinel
             if track.thread is not None:
@@ -291,23 +304,56 @@ class Recorder:
             if self._pa is not None:
                 self._pa.terminate()
                 self._pa = None
+        audio_files.combine_system_parts(self.directory)
         audio_files.mix_tracks(self.directory)
         return int(end_s * 1000)
 
     # -- status ------------------------------------------------------------
 
     def levels(self) -> dict[str, float]:
+        """Current loudness per kind; for PC sound, the loudest output device."""
         result = {"mic": 0.0, "system": 0.0}
+        if self.clock.paused:
+            return result
         now = time.monotonic()
         for track in self._tracks:
-            fresh = now - track.level_at < LEVEL_STALE_S
-            result[track.kind] = track.level if fresh and not self.clock.paused else 0.0
+            if now - track.level_at < LEVEL_STALE_S:
+                result[track.kind] = max(result[track.kind], track.level)
         return result
 
     def errors(self) -> list[str]:
-        return [f"{t.kind}: {t.error}" for t in self._tracks if t.error]
+        return self.warnings + [f"{t.device.name}: {t.error}" for t in self._tracks if t.error]
 
     # -- internals ---------------------------------------------------------
+
+    def _open_portaudio(self):
+        import pyaudiowpatch as pa
+
+        return pa.PyAudio()
+
+    def _open_track(self, kind: str, device: AudioDevice, filename: str) -> None:
+        import pyaudiowpatch as pa
+
+        track = _Track(kind, device, TrackWriter(self.directory / filename, device.rate))
+        try:
+            track.stream = self._pa.open(  # type: ignore[union-attr]
+                format=pa.paFloat32,
+                channels=device.channels,
+                rate=device.rate,
+                input=True,
+                input_device_index=device.id,
+                frames_per_buffer=device.rate // 20,  # 50 ms
+                stream_callback=self._make_callback(track),
+            )
+        except Exception:
+            track.writer.finish(0)
+            (self.directory / filename).unlink(missing_ok=True)
+            raise
+        track.thread = threading.Thread(
+            target=self._drain, args=(track,), name=f"writer-{filename}", daemon=True
+        )
+        track.thread.start()
+        self._tracks.append(track)
 
     def _make_callback(self, track: _Track):
         import pyaudiowpatch as pa
@@ -336,6 +382,6 @@ class Recorder:
             block, at_s = item
             try:
                 track.writer.write(block, at_s)
-            except Exception as exc:  # noqa: BLE001 - keep recording the other track
+            except Exception as exc:  # noqa: BLE001 - keep recording the other tracks
                 track.error = str(exc)
-                log.exception("Writing %s track failed", track.kind)
+                log.exception("Writing %s track failed", track.device.name)

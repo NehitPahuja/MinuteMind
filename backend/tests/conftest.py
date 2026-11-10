@@ -23,22 +23,31 @@ def db() -> store.Store:
 
 MIC = AudioDevice(id=1, name="Test Mic", channels=1, rate=48_000, is_default=True)
 LOOPBACK = AudioDevice(id=2, name="Test Speakers", channels=2, rate=44_100, is_default=True)
+HEADPHONES = AudioDevice(id=3, name="Test Headphones", channels=2, rate=48_000, is_default=False)
 
 
 def fake_devices() -> dict[str, list[AudioDevice]]:
-    return {"inputs": [MIC], "loopbacks": [LOOPBACK]}
+    return {"inputs": [MIC], "loopbacks": [LOOPBACK, HEADPHONES]}
 
 
 class FakeRecorder:
     """Stands in for capture.Recorder: writes short tracks instead of using hardware."""
 
-    def __init__(self, directory: Path, mic: AudioDevice | None, system: AudioDevice | None):
+    # Device names that "fail to open", to test partial starts.
+    broken: set[str] = set()
+
+    def __init__(self, directory: Path, mic: AudioDevice | None, system: list[AudioDevice]):
         self.directory = directory
         self.mic = mic
-        self.system = system
+        self.system = [d for d in system if d.name not in self.broken]
+        self.warnings = [f"Couldn't record {d.name}" for d in system if d.name in self.broken]
         self.clock = ActiveClock()
         self.started = False
         self.stopped = False
+
+    @property
+    def system_devices(self) -> list[AudioDevice]:
+        return self.system
 
     def start(self) -> None:
         self.started = True
@@ -53,10 +62,13 @@ class FakeRecorder:
     def stop(self) -> int:
         self.stopped = True
         samples = np.full(audio_files.SAMPLE_RATE, 1000, dtype=np.int16)  # 1 second
-        for device, name in ((self.mic, audio_files.MIC_FILE), (self.system, audio_files.SYSTEM_FILE)):
-            if device is not None:
-                with audio_files.open_writer(self.directory / name) as w:
-                    w.writeframes(samples.tobytes())
+        if self.mic is not None:
+            with audio_files.open_writer(self.directory / audio_files.MIC_FILE) as w:
+                w.writeframes(samples.tobytes())
+        for index, _device in enumerate(self.system):
+            with audio_files.open_writer(self.directory / audio_files.system_part_file(index)) as w:
+                w.writeframes(samples.tobytes())
+        audio_files.combine_system_parts(self.directory)
         audio_files.mix_tracks(self.directory)
         return 1000
 
@@ -64,4 +76,4 @@ class FakeRecorder:
         return {"mic": 0.5, "system": 0.0}
 
     def errors(self) -> list[str]:
-        return []
+        return list(self.warnings)

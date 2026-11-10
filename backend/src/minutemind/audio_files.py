@@ -18,6 +18,15 @@ HEADER_SIZE = 44
 MIC_FILE = "mic.wav"
 SYSTEM_FILE = "system.wav"
 MIX_FILE = "mix.wav"
+# While recording, each output device's loopback goes to its own part file;
+# the parts are combined into SYSTEM_FILE when the recording stops.
+SYSTEM_PART_GLOB = "system.part*.wav"
+
+
+def system_part_file(index: int) -> str:
+    return f"system.part{index}.wav"
+
+
 TRACK_FILES = {"mix": MIX_FILE, "mic": MIC_FILE, "system": SYSTEM_FILE}
 
 
@@ -68,20 +77,32 @@ def repair_header(path: Path) -> bool:
     return True
 
 
-def mix_tracks(directory: Path) -> Path | None:
-    """Combine mic.wav and system.wav into mix.wav. Returns the mix path, or None
-    if neither track exists."""
-    sources = [directory / name for name in (MIC_FILE, SYSTEM_FILE)]
+def sum_files(sources: list[Path], out: Path) -> Path | None:
+    """Add WAV files sample by sample (padding shorter ones) into `out`."""
     tracks = [read_samples(p).astype(np.int32) for p in sources if p.exists()]
     if not tracks:
         return None
     length = max(len(t) for t in tracks)
-    mixed = np.zeros(length, dtype=np.int32)
+    total = np.zeros(length, dtype=np.int32)
     for track in tracks:
-        mixed[: len(track)] += track
-    mixed = np.clip(mixed, -32768, 32767).astype(np.int16)
-
-    out = directory / MIX_FILE
+        total[: len(track)] += track
     with open_writer(out) as writer:
-        writer.writeframes(mixed.tobytes())
+        writer.writeframes(np.clip(total, -32768, 32767).astype(np.int16).tobytes())
     return out
+
+
+def combine_system_parts(directory: Path) -> Path | None:
+    """Merge the per-output-device loopback parts into system.wav and delete them."""
+    parts = sorted(directory.glob(SYSTEM_PART_GLOB))
+    if not parts:
+        return None
+    out = sum_files(parts, directory / SYSTEM_FILE)
+    for part in parts:
+        part.unlink(missing_ok=True)
+    return out
+
+
+def mix_tracks(directory: Path) -> Path | None:
+    """Combine mic.wav and system.wav into mix.wav. Returns the mix path, or None
+    if neither track exists."""
+    return sum_files([directory / MIC_FILE, directory / SYSTEM_FILE], directory / MIX_FILE)

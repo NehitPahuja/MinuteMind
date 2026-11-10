@@ -51,3 +51,14 @@ def test_mix_with_one_track(tmp_path: Path) -> None:
 
 def test_mix_with_no_tracks(tmp_path: Path) -> None:
     assert audio_files.mix_tracks(tmp_path) is None
+
+
+def test_combine_system_parts(tmp_path: Path) -> None:
+    _write(tmp_path / audio_files.system_part_file(0), np.full(80, 10))
+    _write(tmp_path / audio_files.system_part_file(1), np.full(100, 5))
+    out = audio_files.combine_system_parts(tmp_path)
+    assert out == tmp_path / audio_files.SYSTEM_FILE
+    samples = audio_files.read_samples(out)
+    assert len(samples) == 100 and samples[0] == 15 and samples[90] == 5
+    assert not list(tmp_path.glob(audio_files.SYSTEM_PART_GLOB))
+    assert audio_files.combine_system_parts(tmp_path) is None  # nothing left to combine

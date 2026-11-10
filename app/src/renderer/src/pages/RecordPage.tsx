@@ -6,6 +6,9 @@ import { useBackend, useLevelHistory, useRecording } from '../lib/contexts'
 import { formatClock } from '../lib/format'
 
 const NONE = 'none'
+// Record every output device at once, so call audio is captured whichever
+// output it plays through (speakers, headphones, a Bluetooth headset...).
+const ALL = 'all'
 
 export function RecordPage({
   onStopped
@@ -18,7 +21,7 @@ export function RecordPage({
   const [devices, setDevices] = useState<AudioDevices | null>(null)
   const [deviceError, setDeviceError] = useState<string | null>(null)
   const [micId, setMicId] = useState<string>(NONE)
-  const [systemId, setSystemId] = useState<string>(NONE)
+  const [systemId, setSystemId] = useState<string>(ALL)
   const [title, setTitle] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -33,7 +36,11 @@ export function RecordPage({
         setDevices(list)
         setMicId((current) => (keep(current, list.inputs) ? current : pickDefault(list.inputs)))
         setSystemId((current) =>
-          keep(current, list.loopbacks) ? current : pickDefault(list.loopbacks)
+          list.loopbacks.length === 0
+            ? NONE
+            : current === ALL || keep(current, list.loopbacks)
+              ? current
+              : ALL
         )
       },
       (err: Error) => setDeviceError(err.message)
@@ -61,7 +68,7 @@ export function RecordPage({
       client!.post<Meeting>('/recording/start', {
         title: title.trim() || null,
         mic_device_id: micId === NONE ? null : Number(micId),
-        system_device_id: systemId === NONE ? null : Number(systemId)
+        system_device_id: systemId === NONE ? null : systemId === ALL ? ALL : Number(systemId)
       })
     )
 
@@ -183,6 +190,11 @@ export function RecordPage({
                 devices={devices?.loopbacks}
                 value={systemId}
                 onChange={setSystemId}
+                allOption={
+                  devices && devices.loopbacks.length > 0 ? 'All outputs (recommended)' : undefined
+                })`
+                    : undefined
+                }
               />
               <div className="flex items-center justify-between">
                 <button
@@ -197,9 +209,10 @@ export function RecordPage({
             </div>
           )}
           <p className="px-1 text-xs leading-relaxed text-paper-500">
-            PC sound captures whatever plays through the chosen output, such as the other people on
-            a Zoom, Meet or Teams call. Let everyone know you&apos;re recording. In many places
-            it&apos;s required by law.
+            PC sound captures what the other people on a Zoom, Meet or Teams call say. With All
+            outputs it records every speaker and headphone at once, so nothing is missed if an app
+            plays through a different device. Let everyone know you&apos;re recording. In many
+            places it&apos;s required by law.
           </p>
         </aside>
       </section>
@@ -220,9 +233,17 @@ interface DevicePickerProps {
   devices: AudioDevice[] | undefined
   value: string
   onChange: (value: string) => void
+  /** Label for an extra first option that records every device. */
+  allOption?: string
 }
 
-function DevicePicker({ label, devices, value, onChange }: DevicePickerProps): React.JSX.Element {
+function DevicePicker({
+  label,
+  devices,
+  value,
+  onChange,
+  allOption
+}: DevicePickerProps): React.JSX.Element {
   return (
     <label className="block">
       <span className="eyebrow mb-2 block">{label}</span>
@@ -233,6 +254,7 @@ function DevicePicker({ label, devices, value, onChange }: DevicePickerProps): R
         className="w-full rounded-md border border-line-strong bg-ink-850 px-2.5 py-2 text-sm text-paper-100 focus:border-marker focus:outline-none"
       >
         {!devices && <option value={value}>Looking for devices…</option>}
+        {devices && allOption && <option value={ALL}>{allOption}</option>}
         {devices?.map((d) => (
           <option key={d.id} value={String(d.id)}>
             {d.name}
