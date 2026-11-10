@@ -3,6 +3,7 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { BackendManager } from './backend'
+import { captureScreenshotsIfRequested } from './devScreenshots'
 
 const backend = new BackendManager()
 
@@ -14,7 +15,7 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     show: false,
     title: 'MinuteMind',
-    backgroundColor: '#0b0d17',
+    backgroundColor: '#12100d',
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
@@ -56,8 +57,17 @@ app.whenReady().then(() => {
     }
   })
 
-  createWindow()
+  const win = createWindow()
+  const backendReady = new Promise<void>((resolve) => {
+    const off = backend.onStatus((s) => {
+      if (s.state !== 'starting') {
+        off()
+        resolve()
+      }
+    })
+  })
   void backend.start()
+  void captureScreenshotsIfRequested(win, backendReady)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
