@@ -3,8 +3,8 @@ import { PageHeader, PhaseTag } from '../components/PageHeader'
 const SECTIONS = [
   {
     title: 'Audio devices',
-    body: 'Choose which microphone and speaker output to record.',
-    phase: 1
+    body: 'Pick the microphone and PC sound output on the Record page before each recording.',
+    phase: null
   },
   {
     title: 'Transcription',
@@ -36,9 +36,7 @@ export function SettingsPage(): React.JSX.Element {
           <div key={s.title} className="grid grid-cols-[220px_1fr_auto] items-center gap-6 py-5">
             <dt className="text-sm font-medium text-paper-100">{s.title}</dt>
             <dd className="text-sm text-paper-500">{s.body}</dd>
-            <dd>
-              <PhaseTag phase={s.phase} />
-            </dd>
+            <dd>{s.phase !== null && <PhaseTag phase={s.phase} />}</dd>
           </div>
         ))}
       </dl>

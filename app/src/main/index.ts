@@ -74,7 +74,13 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => backend.stop())
+let quitting = false
+app.on('before-quit', (event) => {
+  if (quitting) return
+  event.preventDefault()
+  quitting = true
+  void backend.shutdown().finally(() => app.quit())
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
