@@ -116,8 +116,8 @@ function EmptyState({ onRecord }: { onRecord: () => void }): React.JSX.Element {
 
 const STATUS_NOTE: Partial<Record<Meeting['status'], { text: string; className: string }>> = {
   recording: { text: 'Recording', className: 'text-signal' },
-  paused: { text: 'Paused', className: 'text-amber' },
-  recovered: { text: 'Recovered after a crash', className: 'text-amber' },
+  paused: { text: 'Paused', className: 'text-paper-300' },
+  recovered: { text: 'Recovered after a crash', className: 'text-paper-300' },
   failed: { text: 'Failed', className: 'text-signal' }
 }
 
@@ -244,7 +244,7 @@ function MeetingDetail({ meeting, onChanged, onDeleted }: MeetingDetailProps): R
             }
           }}
           aria-label="Meeting title"
-          className="w-full border-b border-marker bg-transparent pb-1 text-lg text-paper-50 focus:outline-none"
+          className="w-full border-b border-paper-500 bg-transparent pb-1 text-lg text-paper-50 focus:outline-none"
         />
       ) : null}
 
@@ -261,7 +261,7 @@ function MeetingDetail({ meeting, onChanged, onDeleted }: MeetingDetailProps): R
                 onClick={() => setTrack(t.id)}
                 className={`rounded-sm px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider transition-colors disabled:opacity-30 ${
                   track === t.id
-                    ? 'bg-marker-soft text-marker'
+                    ? 'bg-ink-800 text-paper-50'
                     : 'text-paper-500 hover:text-paper-100'
                 }`}
               >
