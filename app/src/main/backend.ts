@@ -105,6 +105,27 @@ export class BackendManager {
     }
   }
 
+  /**
+   * Ask the backend to finish any recording in progress (so its files are
+   * closed and mixed properly), then stop the process. Never waits longer
+   * than `timeoutMs`.
+   */
+  async shutdown(timeoutMs = 8000): Promise<void> {
+    const connection = this.getConnection()
+    if (connection) {
+      try {
+        await fetch(`${connection.baseUrl}/recording/stop`, {
+          method: 'POST',
+          headers: { [TOKEN_HEADER]: connection.token },
+          signal: AbortSignal.timeout(timeoutMs)
+        })
+      } catch {
+        // Nothing was recording, or the backend is unresponsive: stop it anyway.
+      }
+    }
+    this.stop()
+  }
+
   stop(): void {
     this.stopping = true
     const child = this.child

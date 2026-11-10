@@ -120,3 +120,27 @@
     letter-spacing: -0.02em;
   }
 }
+
+@layer components {
+  /* Audio scrubber: a thin track filled up to --progress with marker yellow. */
+  .scrubber {
+    appearance: none;
+    height: 4px;
+    border-radius: 9999px;
+    cursor: pointer;
+    background: linear-gradient(
+      to right,
+      var(--color-marker) var(--progress, 0%),
+      var(--color-line-strong) var(--progress, 0%)
+    );
+  }
+
+  .scrubber::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 9999px;
+    background: var(--color-paper-50);
+    box-shadow: 0 0 0 3px var(--color-ink-850);
+  }
+}

@@ -1,4 +1,5 @@
-import type { BackendStatus } from '@shared/backend'
+import { useBackend, useRecording } from '../lib/contexts'
+import { formatClock } from '../lib/format'
 import { BackendStatusPill } from './BackendStatusPill'
 
 export type Page = 'meetings' | 'record' | 'ask' | 'settings'
@@ -12,10 +13,14 @@ const NAV: { id: Exclude<Page, 'record'>; label: string }[] = [
 interface SidebarProps {
   page: Page
   onNavigate: (page: Page) => void
-  status: BackendStatus
 }
 
-export function Sidebar({ page, onNavigate, status }: SidebarProps): React.JSX.Element {
+export function Sidebar({ page, onNavigate }: SidebarProps): React.JSX.Element {
+  const { status } = useBackend()
+  const recording = useRecording()
+  const live = recording.state !== 'idle'
+  const paused = recording.state === 'paused'
+
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-ink-900 px-4 pb-4 pt-7">
       <div className="mb-9 px-2">
@@ -35,10 +40,29 @@ export function Sidebar({ page, onNavigate, status }: SidebarProps): React.JSX.E
             : 'border-line bg-ink-850 hover:border-line-strong'
         }`}
       >
-        <span className="grid h-6 w-6 place-items-center rounded-full border border-signal/60">
-          <span className="h-2.5 w-2.5 rounded-full bg-signal transition-transform group-hover:scale-110" />
+        <span
+          className={`grid h-6 w-6 place-items-center rounded-full border border-signal/60 ${
+            live && !paused ? 'animate-rec-pulse' : ''
+          }`}
+        >
+          <span
+            className={`h-2.5 w-2.5 bg-signal transition-transform group-hover:scale-110 ${
+              paused ? 'rounded-[2px] opacity-60' : 'rounded-full'
+            }`}
+          />
         </span>
-        <span className="text-sm font-medium text-paper-50">New recording</span>
+        {live ? (
+          <span className="flex flex-1 items-baseline justify-between">
+            <span className="text-sm font-medium text-paper-50">
+              {paused ? 'Paused' : 'Recording'}
+            </span>
+            <span className="font-mono text-xs tabular-nums text-paper-300">
+              {formatClock(recording.elapsed_ms)}
+            </span>
+          </span>
+        ) : (
+          <span className="text-sm font-medium text-paper-50">New recording</span>
+        )}
       </button>
 
       <nav className="flex flex-1 flex-col gap-0.5" aria-label="Main">

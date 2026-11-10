@@ -1,51 +1,246 @@
-import { PageHeader, PhaseTag } from '../components/PageHeader'
+import { useCallback, useEffect, useState } from 'react'
+import type { AudioDevice, AudioDevices, Meeting } from '@shared/models'
+import { LevelMeter } from '../components/LevelMeter'
+import { PageHeader } from '../components/PageHeader'
+import { useBackend, useLevelHistory, useRecording } from '../lib/contexts'
+import { formatClock } from '../lib/format'
 
-export function RecordPage(): React.JSX.Element {
+const NONE = 'none'
+
+export function RecordPage({
+  onStopped
+}: {
+  onStopped: (meetingId: number) => void
+}): React.JSX.Element {
+  const { client } = useBackend()
+  const recording = useRecording()
+  const history = useLevelHistory()
+  const [devices, setDevices] = useState<AudioDevices | null>(null)
+  const [deviceError, setDeviceError] = useState<string | null>(null)
+  const [micId, setMicId] = useState<string>(NONE)
+  const [systemId, setSystemId] = useState<string>(NONE)
+  const [title, setTitle] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Fetch devices and pick sensible defaults. setState only runs in promise
+  // callbacks, so this is safe to call from an effect.
+  const loadDevices = useCallback(() => {
+    if (!client) return
+    client.get<AudioDevices>('/audio/devices').then(
+      (list) => {
+        setDeviceError(null)
+        setDevices(list)
+        setMicId((current) => (keep(current, list.inputs) ? current : pickDefault(list.inputs)))
+        setSystemId((current) =>
+          keep(current, list.loopbacks) ? current : pickDefault(list.loopbacks)
+        )
+      },
+      (err: Error) => setDeviceError(err.message)
+    )
+  }, [client])
+
+  useEffect(() => {
+    loadDevices()
+  }, [loadDevices])
+
+  const run = async (action: () => Promise<unknown>): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      await action()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const start = (): Promise<void> =>
+    run(() =>
+      client!.post<Meeting>('/recording/start', {
+        title: title.trim() || null,
+        mic_device_id: micId === NONE ? null : Number(micId),
+        system_device_id: systemId === NONE ? null : Number(systemId)
+      })
+    )
+
+  const stop = (): Promise<void> =>
+    run(async () => {
+      const meeting = await client!.post<Meeting>('/recording/stop')
+      setTitle('')
+      onStopped(meeting.id)
+    })
+
+  const active = recording.state !== 'idle'
+  const paused = recording.state === 'paused'
+  const meeting = recording.meeting
+  const canStart = !!client && !busy && (micId !== NONE || systemId !== NONE)
+
   return (
     <>
       <PageHeader
-        eyebrow="Capture"
-        title="New recording"
-        lede="Records your microphone and your PC's sound as separate tracks, so you and the other side of the call are always told apart."
+        eyebrow={active ? (paused ? 'Paused' : 'Recording') : 'Capture'}
+        title={active && meeting ? meeting.title : 'New recording'}
+        lede={
+          active
+            ? 'Recording keeps going if you switch pages. Stop it here when the meeting ends.'
+            : "Records your microphone and your PC's sound as separate tracks, so you and the other side of the call are always told apart."
+        }
       />
 
-      <section className="grid gap-6 lg:grid-cols-[1fr_280px]">
-        <div className="flex flex-col items-center justify-center rounded-lg border border-line bg-ink-900 px-8 py-16">
+      <section className="grid gap-6 lg:grid-cols-[1fr_300px]">
+        <div className="flex flex-col items-center justify-center rounded-lg border border-line bg-ink-900 px-8 py-12">
+          {!active && (
+            <label className="mb-8 w-full max-w-sm">
+              <span className="eyebrow mb-2 block">Title</span>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                maxLength={200}
+                placeholder="Optional, e.g. Weekly planning"
+                className="w-full border-b border-line-strong bg-transparent pb-2 text-lg text-paper-50 placeholder:text-paper-700 focus:border-marker focus:outline-none"
+              />
+            </label>
+          )}
+
           <button
             type="button"
-            disabled
-            aria-label="Start recording (available in Phase 1)"
-            className="grid h-24 w-24 place-items-center rounded-full border-2 border-signal/50 bg-ink-850 opacity-70"
+            onClick={() => void (active ? stop() : start())}
+            disabled={active ? busy : !canStart}
+            aria-label={active ? 'Stop recording' : 'Start recording'}
+            className={`grid h-24 w-24 place-items-center rounded-full border-2 transition-colors disabled:opacity-40 ${
+              active
+                ? 'border-signal bg-signal-soft hover:bg-signal/25'
+                : 'border-signal/50 bg-ink-850 hover:border-signal'
+            } ${active && !paused ? 'animate-rec-pulse' : ''}`}
           >
-            <span className="h-9 w-9 rounded-full bg-signal" />
+            {active ? (
+              <span className="h-8 w-8 rounded-[4px] bg-signal" />
+            ) : (
+              <span className="h-9 w-9 rounded-full bg-signal" />
+            )}
           </button>
-          <p className="mt-6 font-mono text-3xl tabular-nums text-paper-300">00:00:00</p>
-          <div className="mt-4 flex items-center gap-2">
-            <span className="text-sm text-paper-500">Recording controls arrive in</span>
-            <PhaseTag phase={1} />
-          </div>
+
+          <p
+            className={`mt-6 font-mono text-3xl tabular-nums ${active ? 'text-paper-50' : 'text-paper-500'}`}
+            aria-live="off"
+          >
+            {formatClock(recording.elapsed_ms)}
+          </p>
+          <p className="mt-2 text-sm text-paper-500">
+            {active
+              ? paused
+                ? 'Paused. Nothing is being recorded.'
+                : 'Click the square to stop.'
+              : 'Click to start recording.'}
+          </p>
+
+          {active && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                void run(() => client!.post(paused ? '/recording/resume' : '/recording/pause'))
+              }
+              className="mt-6 rounded-md border border-line-strong px-4 py-1.5 font-mono text-xs uppercase tracking-wider text-paper-300 hover:border-paper-500 hover:text-paper-50 disabled:opacity-40"
+            >
+              {paused ? 'Resume' : 'Pause'}
+            </button>
+          )}
+
+          {(error || recording.errors.length > 0) && (
+            <p className="mt-6 max-w-md text-center text-sm text-signal" role="alert">
+              {error ?? recording.errors.join(' ')}
+            </p>
+          )}
         </div>
 
         <aside className="space-y-4">
-          {['Microphone', 'PC sound'].map((label) => (
-            <div key={label} className="rounded-lg border border-line bg-ink-900 p-4">
-              <p className="eyebrow mb-3">{label}</p>
-              <div className="flex h-8 items-end gap-[3px]" aria-hidden="true">
-                {Array.from({ length: 24 }, (_, i) => (
-                  <span
-                    key={i}
-                    className="w-full rounded-[1px] bg-line"
-                    style={{ height: '20%' }}
-                  />
-                ))}
+          {active ? (
+            <>
+              <LevelMeter
+                label="You · microphone"
+                device={meeting?.mic_device ?? null}
+                history={history.mic}
+              />
+              <LevelMeter
+                label="Others · PC sound"
+                device={meeting?.system_device ?? null}
+                history={history.system}
+              />
+            </>
+          ) : (
+            <div className="space-y-5 rounded-lg border border-line bg-ink-900 p-4">
+              <DevicePicker
+                label="You · microphone"
+                devices={devices?.inputs}
+                value={micId}
+                onChange={setMicId}
+              />
+              <DevicePicker
+                label="Others · PC sound"
+                devices={devices?.loopbacks}
+                value={systemId}
+                onChange={setSystemId}
+              />
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={loadDevices}
+                  className="font-mono text-[11px] uppercase tracking-wider text-paper-500 hover:text-paper-100"
+                >
+                  Refresh devices
+                </button>
+                {deviceError && <span className="text-xs text-signal">{deviceError}</span>}
               </div>
             </div>
-          ))}
+          )}
           <p className="px-1 text-xs leading-relaxed text-paper-500">
-            Let everyone know you&apos;re recording. In many places it&apos;s required by law.
+            PC sound captures whatever plays through the chosen output, such as the other people on
+            a Zoom, Meet or Teams call. Let everyone know you&apos;re recording. In many places
+            it&apos;s required by law.
           </p>
         </aside>
       </section>
     </>
+  )
+}
+
+function pickDefault(items: AudioDevice[]): string {
+  return String((items.find((d) => d.is_default) ?? items[0])?.id ?? NONE)
+}
+
+function keep(current: string, items: AudioDevice[]): boolean {
+  return current !== NONE && items.some((d) => String(d.id) === current)
+}
+
+interface DevicePickerProps {
+  label: string
+  devices: AudioDevice[] | undefined
+  value: string
+  onChange: (value: string) => void
+}
+
+function DevicePicker({ label, devices, value, onChange }: DevicePickerProps): React.JSX.Element {
+  return (
+    <label className="block">
+      <span className="eyebrow mb-2 block">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={!devices}
+        className="w-full rounded-md border border-line-strong bg-ink-850 px-2.5 py-2 text-sm text-paper-100 focus:border-marker focus:outline-none"
+      >
+        {!devices && <option value={value}>Looking for devices…</option>}
+        {devices?.map((d) => (
+          <option key={d.id} value={String(d.id)}>
+            {d.name}
+            {d.is_default ? ' (default)' : ''}
+          </option>
+        ))}
+        {devices && <option value={NONE}>Don&apos;t record</option>}
+      </select>
+    </label>
   )
 }
