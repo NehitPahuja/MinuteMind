@@ -32,6 +32,12 @@ log = logging.getLogger(__name__)
 # so ordinary callback jitter never inserts gaps.
 DRIFT_TOLERANCE_S = 0.25
 
+# PortAudio's initialise/terminate, device enumeration and stream open/close are
+# not thread-safe: two API requests listing devices at the same moment crashed
+# the whole process with an access violation. Every such call goes through this
+# lock. (Audio callbacks and stream reads don't need it.)
+PORTAUDIO_LOCK = threading.RLock()
+
 # A level reading older than this counts as silence (loopback sends nothing when quiet).
 LEVEL_STALE_S = 0.3
 
@@ -157,6 +163,11 @@ def list_devices() -> dict[str, list[AudioDevice]]:
     """WASAPI microphones and loopback (PC sound) devices."""
     import pyaudiowpatch as pa
 
+    with PORTAUDIO_LOCK:
+        return _list_devices_locked(pa)
+
+
+def _list_devices_locked(pa) -> dict[str, list[AudioDevice]]:
     p = pa.PyAudio()
     try:
         wasapi = p.get_host_api_info_by_type(pa.paWASAPI)
@@ -218,6 +229,10 @@ class Recorder:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        with PORTAUDIO_LOCK:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
         import pyaudiowpatch as pa
 
         self._pa = pa.PyAudio()
@@ -257,22 +272,25 @@ class Recorder:
     def stop(self) -> int:
         """Stop all streams, finish the files and build the mix. Returns duration in ms."""
         end_s = self.clock.elapsed()
-        for track in self._tracks:
-            stream = track.stream
-            if stream is not None:
-                try:
-                    stream.stop_stream()  # type: ignore[attr-defined]
-                    stream.close()  # type: ignore[attr-defined]
-                except Exception:  # noqa: BLE001 - best effort during shutdown
-                    log.exception("Closing %s stream failed", track.kind)
+        with PORTAUDIO_LOCK:
+            for track in self._tracks:
+                stream = track.stream
+                track.stream = None
+                if stream is not None:
+                    try:
+                        stream.stop_stream()  # type: ignore[attr-defined]
+                        stream.close()  # type: ignore[attr-defined]
+                    except Exception:  # noqa: BLE001 - best effort during shutdown
+                        log.exception("Closing %s stream failed", track.kind)
         for track in self._tracks:
             track.queue.put(None)  # sentinel
             if track.thread is not None:
                 track.thread.join(timeout=10)
             track.writer.finish(end_s)
-        if self._pa is not None:
-            self._pa.terminate()
-            self._pa = None
+        with PORTAUDIO_LOCK:
+            if self._pa is not None:
+                self._pa.terminate()
+                self._pa = None
         audio_files.mix_tracks(self.directory)
         return int(end_s * 1000)
 

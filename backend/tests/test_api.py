@@ -112,3 +112,32 @@ def test_websocket_rejects_bad_token(client: TestClient) -> None:
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/ws?token=nope") as ws:
             ws.receive_json()
+
+
+def test_cors_preflight_from_dev_server(client: TestClient) -> None:
+    """In `npm run dev` the UI runs on http://localhost:5173, another origin."""
+    res = client.options(
+        "/audio/devices",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-minutemind-token",
+        },
+    )
+    assert res.status_code == 200
+    assert res.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "x-minutemind-token" in res.headers["access-control-allow-headers"].lower()
+
+    real = client.get("/health", headers={**AUTH, "Origin": "http://localhost:5173"})
+    assert real.status_code == 200
+    assert real.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_cors_rejects_other_origins(client: TestClient) -> None:
+    res = client.options(
+        "/audio/devices",
+        headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"},
+    )
+    assert "access-control-allow-origin" not in res.headers
+    # And the token is still required even from an allowed origin.
+    assert client.get("/health", headers={"Origin": "http://localhost:5173"}).status_code == 401
