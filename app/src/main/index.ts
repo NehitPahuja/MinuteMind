@@ -15,7 +15,7 @@ function createWindow(): BrowserWindow {
     minHeight: 600,
     show: false,
     title: 'MinuteMind',
-    backgroundColor: '#12100d',
+    backgroundColor: '#000000',
     autoHideMenuBar: true,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
