@@ -14,7 +14,7 @@ function Shell(): React.JSX.Element {
   return (
     <div className="flex h-screen text-paper-100">
       <Sidebar page={page} onNavigate={setPage} />
-      <main className="ruled flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto bg-ink-950">
         <div className="mx-auto max-w-4xl px-12 py-12">
           {page === 'meetings' && (
             <MeetingsPage
