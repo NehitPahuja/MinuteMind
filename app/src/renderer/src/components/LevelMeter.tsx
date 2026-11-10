@@ -21,7 +21,7 @@ export function LevelMeter({
       <div className="mb-1 flex items-baseline justify-between gap-3">
         <p className="eyebrow">{label}</p>
         <span
-          className={`font-mono text-[10px] ${current > 0.05 ? 'text-sage' : 'text-paper-700'}`}
+          className={`font-mono text-[10px] ${current > 0.05 ? 'text-paper-300' : 'text-paper-700'}`}
           aria-hidden="true"
         >
           {off ? 'OFF' : current > 0.05 ? 'SIGNAL' : 'QUIET'}
@@ -42,7 +42,7 @@ export function LevelMeter({
           <span
             key={i}
             className={`w-full rounded-[1px] transition-[height] duration-75 ${
-              v > 0.85 ? 'bg-signal' : v > 0.05 ? 'bg-paper-300' : 'bg-line'
+              v > 0.05 ? 'bg-paper-300' : 'bg-line'
             }`}
             style={{ height: `${Math.max(8, v * 100)}%` }}
           />

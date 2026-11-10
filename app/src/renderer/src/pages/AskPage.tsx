@@ -13,7 +13,7 @@ export function AskPage(): React.JSX.Element {
         eyebrow="Recall"
         title={
           <>
-            Ask your <span className="marker italic">meetings</span>
+            Ask your <span className="italic">meetings</span>
           </>
         }
         lede="Answers come straight from what was said, with a timestamp you can click to hear it."

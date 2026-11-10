@@ -25,7 +25,7 @@ export function Sidebar({ page, onNavigate }: SidebarProps): React.JSX.Element {
     <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-ink-900 px-4 pb-4 pt-7">
       <div className="mb-9 px-2">
         <p className="display text-[26px] leading-none text-paper-50">
-          Minute<span className="marker italic">Mind</span>
+          Minute<span className="italic">Mind</span>
         </p>
         <p className="eyebrow mt-2">Meeting notebook</p>
       </div>
@@ -36,19 +36,13 @@ export function Sidebar({ page, onNavigate }: SidebarProps): React.JSX.Element {
         aria-current={page === 'record' ? 'page' : undefined}
         className={`group mb-8 flex items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors ${
           page === 'record'
-            ? 'border-signal/50 bg-signal-soft'
+            ? 'border-line-strong bg-ink-800'
             : 'border-line bg-ink-850 hover:border-line-strong'
         }`}
       >
-        <span
-          className={`grid h-6 w-6 place-items-center rounded-full border border-signal/60 ${
-            live && !paused ? 'animate-rec-pulse' : ''
-          }`}
-        >
+        <span className="grid h-6 w-6 place-items-center rounded-full border border-line-strong">
           <span
-            className={`h-2.5 w-2.5 bg-signal transition-transform group-hover:scale-110 ${
-              paused ? 'rounded-[2px] opacity-60' : 'rounded-full'
-            }`}
+            className={`h-2.5 w-2.5 bg-signal ${paused ? 'rounded-[2px] opacity-60' : 'rounded-full'}`}
           />
         </span>
         {live ? (
@@ -80,7 +74,7 @@ export function Sidebar({ page, onNavigate }: SidebarProps): React.JSX.Element {
             >
               {active && (
                 <span
-                  className="absolute -left-4 top-1/2 h-4 w-0.5 -translate-y-1/2 bg-marker"
+                  className="absolute -left-4 top-1/2 h-4 w-px -translate-y-1/2 bg-paper-100"
                   aria-hidden="true"
                 />
               )}

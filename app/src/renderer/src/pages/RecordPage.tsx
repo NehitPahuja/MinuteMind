@@ -106,7 +106,7 @@ export function RecordPage({
                 onChange={(e) => setTitle(e.target.value)}
                 maxLength={200}
                 placeholder="Optional, e.g. Weekly planning"
-                className="w-full border-b border-line-strong bg-transparent pb-2 text-lg text-paper-50 placeholder:text-paper-700 focus:border-marker focus:outline-none"
+                className="w-full border-b border-line-strong bg-transparent pb-2 text-lg text-paper-50 placeholder:text-paper-700 focus:border-paper-500 focus:outline-none"
               />
             </label>
           )}
@@ -116,14 +116,14 @@ export function RecordPage({
             onClick={() => void (active ? stop() : start())}
             disabled={active ? busy : !canStart}
             aria-label={active ? 'Stop recording' : 'Start recording'}
-            className={`grid h-24 w-24 place-items-center rounded-full border-2 transition-colors disabled:opacity-40 ${
+            className={`grid h-24 w-24 place-items-center rounded-full border transition-colors disabled:opacity-40 ${
               active
-                ? 'border-signal bg-signal-soft hover:bg-signal/25'
-                : 'border-signal/50 bg-ink-850 hover:border-signal'
-            } ${active && !paused ? 'animate-rec-pulse' : ''}`}
+                ? 'border-paper-500 bg-ink-800 hover:bg-ink-850'
+                : 'border-line-strong bg-ink-850 hover:border-paper-500'
+            }`}
           >
             {active ? (
-              <span className="h-8 w-8 rounded-[4px] bg-signal" />
+              <span className="h-7 w-7 rounded-[3px] bg-paper-100" />
             ) : (
               <span className="h-9 w-9 rounded-full bg-signal" />
             )}
@@ -249,7 +249,7 @@ function DevicePicker({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={!devices}
-        className="w-full rounded-md border border-line-strong bg-ink-850 px-2.5 py-2 text-sm text-paper-100 focus:border-marker focus:outline-none"
+        className="w-full rounded-md border border-line-strong bg-ink-850 px-2.5 py-2 text-sm text-paper-100 focus:border-paper-500 focus:outline-none"
       >
         {!devices && <option value={value}>Looking for devices…</option>}
         {devices && allOption && <option value={ALL}>{allOption}</option>}

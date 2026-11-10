@@ -1,8 +1,8 @@
 import type { BackendStatus } from '@shared/backend'
 
 const STATES = {
-  starting: { dot: 'bg-amber animate-pulse', label: 'Engine starting' },
-  ready: { dot: 'bg-sage', label: 'Engine ready' },
+  starting: { dot: 'bg-paper-500', label: 'Engine starting' },
+  ready: { dot: 'bg-ok', label: 'Engine ready' },
   error: { dot: 'bg-signal', label: 'Engine stopped' }
 } as const
 
@@ -25,12 +25,12 @@ export function BackendStatusPill({ status }: { status: BackendStatus }): React.
       </div>
 
       {status.state === 'error' && (
-        <div className="space-y-2 rounded-md border border-signal/30 bg-signal-soft p-3 text-xs text-paper-100">
+        <div className="space-y-2 rounded-md border border-line-strong bg-ink-850 p-3 text-xs text-paper-100">
           <p className="break-words leading-relaxed">{status.message}</p>
           <button
             type="button"
             onClick={() => void window.api.backend.restart()}
-            className="font-mono text-[11px] uppercase tracking-wider text-signal hover:text-paper-50"
+            className="font-mono text-[11px] uppercase tracking-wider text-paper-300 hover:text-paper-50"
           >
             Restart engine →
           </button>

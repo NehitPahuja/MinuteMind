@@ -5,9 +5,10 @@
 @import 'tailwindcss';
 
 /*
- * MinuteMind design tokens: "ink and paper", on true black.
- * A black notebook with neutral grey text. Red-orange is reserved for recording,
- * highlighter yellow for search hits and citations, sage for healthy status.
+ * MinuteMind design tokens: black and grey.
+ * Colour is used only where it means something: a muted red for the record
+ * dot and errors, and a muted green for a healthy engine. Everything else is
+ * greyscale. No glows, pulses or highlighter effects.
  */
 @theme {
   --font-display: 'Fraunces Variable', Georgia, 'Times New Roman', serif;
@@ -27,24 +28,8 @@
   --color-paper-500: #767676;
   --color-paper-700: #525252;
 
-  --color-signal: #ff5b3a;
-  --color-signal-soft: #ff5b3a26;
-  --color-marker: #f2c94c;
-  --color-marker-soft: #f2c94c2e;
-  --color-sage: #9cc28a;
-  --color-amber: #e8a53d;
-
-  --animate-rec-pulse: rec-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes rec-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 var(--color-signal-soft);
-  }
-  50% {
-    box-shadow: 0 0 0 6px transparent;
-  }
+  --color-signal: #c4513f;
+  --color-ok: #7a9472;
 }
 
 @layer base {
@@ -65,12 +50,12 @@
   }
 
   ::selection {
-    background: var(--color-marker-soft);
+    background: color-mix(in oklab, var(--color-paper-50) 22%, transparent);
     color: var(--color-paper-50);
   }
 
   :focus-visible {
-    outline: 2px solid var(--color-marker);
+    outline: 1px solid var(--color-paper-300);
     outline-offset: 2px;
   }
 }
@@ -86,21 +71,6 @@
       color-mix(in oklab, var(--color-line) 45%, transparent) 31px,
       color-mix(in oklab, var(--color-line) 45%, transparent) 32px
     );
-  }
-
-  /* Highlighter stroke, slightly uneven like a real marker. */
-  .marker {
-    background-image: linear-gradient(
-      100deg,
-      transparent 0.2em,
-      var(--color-marker-soft) 0.35em,
-      color-mix(in oklab, var(--color-marker) 30%, transparent) 60%,
-      var(--color-marker-soft) calc(100% - 0.3em),
-      transparent calc(100% - 0.15em)
-    );
-    background-repeat: no-repeat;
-    background-size: 100% 0.55em;
-    background-position: 0 88%;
   }
 
   .eyebrow {
@@ -122,7 +92,7 @@
 }
 
 @layer components {
-  /* Audio scrubber: a thin track filled up to --progress with marker yellow. */
+  /* Audio scrubber: a thin track filled up to --progress. */
   .scrubber {
     appearance: none;
     height: 4px;
@@ -130,7 +100,7 @@
     cursor: pointer;
     background: linear-gradient(
       to right,
-      var(--color-marker) var(--progress, 0%),
+      var(--color-paper-100) var(--progress, 0%),
       var(--color-line-strong) var(--progress, 0%)
     );
   }
