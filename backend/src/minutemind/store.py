@@ -115,6 +115,22 @@ class Store:
         assert meeting_id is not None
         return self.get_meeting(meeting_id)  # type: ignore[return-value]
 
+    def set_devices(
+        self, meeting_id: int, mic_device: str | None, system_device: str | None
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE meetings SET mic_device = ?, system_device = ?,"
+                " has_mic = ?, has_system = ? WHERE id = ?",
+                (
+                    mic_device,
+                    system_device,
+                    int(mic_device is not None),
+                    int(system_device is not None),
+                    meeting_id,
+                ),
+            )
+
     def set_status(self, meeting_id: int, status: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE meetings SET status = ? WHERE id = ?", (status, meeting_id))

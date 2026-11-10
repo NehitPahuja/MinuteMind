@@ -141,3 +141,14 @@ def test_cors_rejects_other_origins(client: TestClient) -> None:
     assert "access-control-allow-origin" not in res.headers
     # And the token is still required even from an allowed origin.
     assert client.get("/health", headers={"Origin": "http://localhost:5173"}).status_code == 401
+
+
+def test_start_with_all_outputs(client: TestClient) -> None:
+    res = client.post(
+        "/recording/start", json={"mic_device_id": MIC.id, "system_device_id": "all"}, headers=AUTH
+    )
+    assert res.status_code == 200
+    assert res.json()["system_device"].startswith("All outputs (")
+    bad = {"system_device_id": "everything"}
+    client.post("/recording/stop", headers=AUTH)
+    assert client.post("/recording/start", json=bad, headers=AUTH).status_code == 422

@@ -85,3 +85,14 @@ def test_rms_level_range() -> None:
     assert rms_level(np.ones(100, dtype=np.float32)) == pytest.approx(1.0)
     quiet = rms_level(np.full(100, 0.01, dtype=np.float32))  # -40 dBFS
     assert 0.2 < quiet < 0.5
+
+
+def test_tracks_at_different_rates_end_at_the_same_sample(tmp_path: Path) -> None:
+    lengths = []
+    for rate, channels in ((48_000, 1), (44_100, 2), (16_000, 1)):
+        writer = TrackWriter(tmp_path / f"{rate}.wav", rate)
+        end = _feed(writer, _sine(rate, 2.3, channels), rate, 0.0)
+        writer.finish(end)
+        lengths.append(len(audio_files.read_samples(tmp_path / f"{rate}.wav")))
+    assert len(set(lengths)) == 1
+    assert lengths[0] == round(2.3 * audio_files.SAMPLE_RATE)

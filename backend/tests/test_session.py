@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from minutemind import audio_files, paths, store
-from minutemind.session import RecordingError, RecordingSession
+from minutemind.session import ALL_OUTPUTS, RecordingError, RecordingSession
 
 from conftest import LOOPBACK, MIC, FakeRecorder, fake_devices
 
@@ -74,3 +74,38 @@ def test_recover_interrupted(session: RecordingSession, db: store.Store) -> None
     assert recovered.duration_ms == 3000
     assert (paths.meeting_dir(crashed.id) / audio_files.MIX_FILE).exists()
     assert db.get_meeting(empty.id).status == store.FAILED  # type: ignore[union-attr]
+
+
+def test_all_outputs_records_every_loopback(session: RecordingSession) -> None:
+    meeting = session.start(None, MIC.id, ALL_OUTPUTS)
+    assert meeting.system_device == "All outputs (Test Speakers, Test Headphones)"
+    done = session.stop()
+    folder = paths.meeting_dir(done.id)
+    system = audio_files.read_samples(folder / audio_files.SYSTEM_FILE)
+    assert system[0] == 2000  # both outputs' sound summed into one track
+    assert not list(folder.glob(audio_files.SYSTEM_PART_GLOB))  # parts cleaned up
+
+
+def test_failed_output_is_skipped_with_a_warning(
+    session: RecordingSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeRecorder, "broken", {"Test Headphones"})
+    meeting = session.start(None, MIC.id, ALL_OUTPUTS)
+    assert meeting.system_device == "All outputs (Test Speakers)"
+    assert any("Test Headphones" in e for e in session.status()["errors"])
+
+
+def test_recover_interrupted_combines_output_parts(
+    session: RecordingSession, db: store.Store
+) -> None:
+    crashed = db.create_meeting("Crashed", None, "All outputs (A, B)")
+    folder = paths.meeting_dir(crashed.id)
+    for index in range(2):
+        with audio_files.open_writer(folder / audio_files.system_part_file(index)) as w:
+            w.writeframes(np.full(audio_files.SAMPLE_RATE, 100, dtype=np.int16).tobytes())
+    session.recover_interrupted()
+    recovered = db.get_meeting(crashed.id)
+    assert recovered is not None and recovered.status == store.RECOVERED
+    assert recovered.has_system and recovered.duration_ms == 1000
+    assert audio_files.read_samples(folder / audio_files.SYSTEM_FILE)[0] == 200
+    assert not list(folder.glob(audio_files.SYSTEM_PART_GLOB))
