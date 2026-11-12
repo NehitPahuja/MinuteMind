@@ -40,6 +40,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "processing": "auto",
     # Start transcribing as soon as a recording stops.
     "auto_transcribe": True,
+    # Show a rough transcript while recording.
+    "live_transcript": True,
 }
 
 # Each entry upgrades the schema by one version. Never edit an entry once shipped.
@@ -80,6 +82,18 @@ MIGRATIONS: list[str] = [
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
+    """,
+    # 3: notes typed during or after a meeting
+    """
+    CREATE TABLE notes (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        ts_ms      INTEGER NOT NULL,  -- moment in the meeting the note refers to
+        text       TEXT    NOT NULL,
+        created_at TEXT    NOT NULL,
+        updated_at TEXT    NOT NULL
+    );
+    CREATE INDEX notes_by_meeting ON notes (meeting_id, ts_ms);
     """,
 ]
 
@@ -318,6 +332,47 @@ class Store:
             for r in rows
         ]
 
+    # -- notes ------------------------------------------------------------
+
+    def add_note(self, meeting_id: int, ts_ms: int, text: str) -> Note:
+        now = _now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO notes (meeting_id, ts_ms, text, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (meeting_id, ts_ms, text, now, now),
+            )
+            note_id = cur.lastrowid
+        assert note_id is not None
+        return self.get_note(note_id)  # type: ignore[return-value]
+
+    def get_note(self, note_id: int) -> Note | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return _row_to_note(row) if row else None
+
+    def list_notes(self, meeting_id: int) -> list[Note]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notes WHERE meeting_id = ? ORDER BY ts_ms, id", (meeting_id,)
+            ).fetchall()
+        return [_row_to_note(r) for r in rows]
+
+    def update_note(
+        self, note_id: int, text: str | None = None, ts_ms: int | None = None
+    ) -> Note | None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE notes SET text = COALESCE(?, text), ts_ms = COALESCE(?, ts_ms),"
+                " updated_at = ? WHERE id = ?",
+                (text, ts_ms, _now(), note_id),
+            )
+        return self.get_note(note_id)
+
+    def delete_note(self, note_id: int) -> bool:
+        with self._connect() as conn:
+            return bool(conn.execute("DELETE FROM notes WHERE id = ?", (note_id,)).rowcount)
+
     # -- settings ---------------------------------------------------------
 
     def get_settings(self) -> dict[str, object]:
@@ -337,6 +392,30 @@ class Store:
                 [(key, json.dumps(value)) for key, value in changes.items()],
             )
         return self.get_settings()
+
+
+@dataclass(frozen=True)
+class Note:
+    id: int
+    meeting_id: int
+    ts_ms: int
+    text: str
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _row_to_note(row: sqlite3.Row) -> Note:
+    return Note(
+        id=row["id"],
+        meeting_id=row["meeting_id"],
+        ts_ms=row["ts_ms"],
+        text=row["text"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
 
 
 def _row_to_meeting(row: sqlite3.Row) -> Meeting:

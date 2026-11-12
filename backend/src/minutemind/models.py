@@ -34,6 +34,8 @@ WHISPER_FILES = [
 
 ProgressCallback = Callable[[float], None]
 
+DOWNLOAD_ATTEMPTS = 6
+
 
 def models_dir() -> Path:
     path = paths.data_dir() / "models"
@@ -73,10 +75,19 @@ def download_whisper(name: str, on_progress: ProgressCallback | None = None) -> 
     error: list[BaseException] = []
 
     def fetch() -> None:
+        # Slow or flaky connections stall; huggingface_hub keeps partial files,
+        # so each retry resumes where the last attempt stopped.
         try:
-            snapshot_download(repo, local_dir=staging, allow_patterns=WHISPER_FILES)
-        except BaseException as exc:  # noqa: BLE001 - re-raised below
-            error.append(exc)
+            for attempt in range(DOWNLOAD_ATTEMPTS):
+                try:
+                    snapshot_download(repo, local_dir=staging, allow_patterns=WHISPER_FILES)
+                    return
+                except Exception as exc:  # noqa: BLE001 - retried, then re-raised below
+                    log.warning("Download of %s failed (attempt %d): %s", name, attempt + 1, exc)
+                    if attempt + 1 == DOWNLOAD_ATTEMPTS:
+                        error.append(exc)
+                    else:
+                        time.sleep(min(30, 2 ** attempt))
         finally:
             done.set()
 

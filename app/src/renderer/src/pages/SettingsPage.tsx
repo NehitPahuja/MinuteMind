@@ -134,6 +134,16 @@ export function SettingsPage(): React.JSX.Element {
               />
               Transcribe meetings automatically when a recording stops
             </label>
+            <label className="flex cursor-pointer items-center gap-3 text-sm text-paper-100">
+              <input
+                type="checkbox"
+                checked={settings?.live_transcript ?? true}
+                disabled={!settings}
+                onChange={(e) => change({ live_transcript: e.target.checked })}
+                className="h-4 w-4 accent-paper-100"
+              />
+              Show a live transcript while recording
+            </label>
             <p className="text-xs leading-relaxed text-paper-500">
               Speech model: {hardware?.model.name ?? 'large-v3-turbo'}
               {hardware

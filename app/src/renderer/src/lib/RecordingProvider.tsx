@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { RecordingStatus, TranscriptionJobs } from '@shared/models'
+import type {
+  LiveLine,
+  LiveState as LiveTranscriptState,
+  LiveTranscript,
+  RecordingStatus,
+  TranscriptionJobs
+} from '@shared/models'
 import {
   EMPTY_HISTORY,
   IDLE_RECORDING,
   LEVEL_HISTORY,
   NO_JOBS,
+  NO_LIVE,
   RecordingContext,
   useBackend,
   type LevelHistory
@@ -14,12 +21,22 @@ interface LiveState {
   status: RecordingStatus
   history: LevelHistory
   transcription: TranscriptionJobs
+  live: LiveTranscript
 }
 
 const INITIAL: LiveState = {
   status: IDLE_RECORDING,
   history: EMPTY_HISTORY,
-  transcription: NO_JOBS
+  transcription: NO_JOBS,
+  live: NO_LIVE
+}
+
+interface LiveMessage {
+  meeting_id: number | null
+  state: LiveTranscriptState
+  detail: string | null
+  reset: boolean
+  lines: LiveLine[]
 }
 
 /**
@@ -43,6 +60,24 @@ export function RecordingProvider({ children }: { children: React.ReactNode }): 
         const { type, ...payload } = JSON.parse(event.data as string) as { type: string }
         if (type === 'recording') {
           setLive((prev) => next(prev, payload as RecordingStatus))
+        } else if (type === 'live') {
+          const msg = payload as LiveMessage
+          setLive((prev) => {
+            const same =
+              !msg.reset &&
+              msg.lines.length === 0 &&
+              prev.live.state === msg.state &&
+              prev.live.detail === msg.detail
+            if (same) return prev
+            const base = msg.reset ? [] : prev.live.lines
+            const lines = msg.lines.length
+              ? [...base, ...msg.lines].sort((a, b) => a.start_ms - b.start_ms || a.id - b.id)
+              : base
+            return {
+              ...prev,
+              live: { meetingId: msg.meeting_id, state: msg.state, detail: msg.detail, lines }
+            }
+          })
         } else if (type === 'transcription') {
           const jobs = payload as TranscriptionJobs
           // Sent many times a second; only re-render when something changed.

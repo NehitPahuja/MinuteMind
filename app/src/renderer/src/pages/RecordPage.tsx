@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AudioDevice, AudioDevices, Meeting } from '@shared/models'
 import { LevelMeter } from '../components/LevelMeter'
+import { LiveTranscriptPanel } from '../components/LiveTranscriptPanel'
+import { NotesPanel } from '../components/NotesPanel'
 import { PageHeader } from '../components/PageHeader'
-import { useBackend, useLevelHistory, useRecording } from '../lib/contexts'
+import { useBackend, useLevelHistory, useLiveTranscript, useRecording } from '../lib/contexts'
 import { formatClock } from '../lib/format'
 
 const NONE = 'none'
@@ -18,6 +20,7 @@ export function RecordPage({
   const { client } = useBackend()
   const recording = useRecording()
   const history = useLevelHistory()
+  const live = useLiveTranscript()
   const [devices, setDevices] = useState<AudioDevices | null>(null)
   const [deviceError, setDeviceError] = useState<string | null>(null)
   const [micId, setMicId] = useState<string>(NONE)
@@ -97,7 +100,11 @@ export function RecordPage({
       />
 
       <section className="grid gap-6 lg:grid-cols-[1fr_300px]">
-        <div className="flex flex-col items-center justify-center rounded-lg border border-line bg-ink-900 px-8 py-12">
+        <div
+          className={`flex flex-col items-center justify-center rounded-lg border border-line bg-ink-900 px-8 ${
+            active ? 'py-8' : 'py-12'
+          }`}
+        >
           {!active && (
             <label className="mb-8 w-full max-w-sm">
               <span className="eyebrow mb-2 block">Title</span>
@@ -206,14 +213,25 @@ export function RecordPage({
               </div>
             </div>
           )}
-          <p className="px-1 text-xs leading-relaxed text-paper-500">
-            PC sound captures what the other people on a Zoom, Meet or Teams call say. With All
-            outputs it records every speaker and headphone at once, so nothing is missed if an app
-            plays through a different device. Let everyone know you&apos;re recording. In many
-            places it&apos;s required by law.
-          </p>
+          {!active && (
+            <p className="px-1 text-xs leading-relaxed text-paper-500">
+              PC sound captures what the other people on a Zoom, Meet or Teams call say. With All
+              outputs it records every speaker and headphone at once, so nothing is missed if an app
+              plays through a different device. Let everyone know you&apos;re recording. In many
+              places it&apos;s required by law.
+            </p>
+          )}
         </aside>
       </section>
+
+      {active && meeting && (
+        <section className="mt-6 grid gap-6 lg:grid-cols-[1fr_300px]">
+          <LiveTranscriptPanel
+            live={live.meetingId === meeting.id ? live : { ...live, lines: [] }}
+          />
+          <NotesPanel meetingId={meeting.id} />
+        </section>
+      )}
     </>
   )
 }

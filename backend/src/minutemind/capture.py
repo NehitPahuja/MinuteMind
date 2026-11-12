@@ -26,6 +26,11 @@ import soxr
 
 from minutemind import audio_files
 
+# Receives every chunk of 16 kHz mono audio a track writes, with the index of
+# its first sample on the meeting timeline: tap(kind, start_frame, frames).
+# Used by the live transcript. Runs on the track's writer thread.
+AudioTap = Callable[[str, int, np.ndarray], None]
+
 log = logging.getLogger(__name__)
 
 # A track is padded with silence only when it lags the clock by more than this,
@@ -84,8 +89,11 @@ class TrackWriter:
     small delay out of the arithmetic.
     """
 
-    def __init__(self, path: Path, in_rate: int) -> None:
+    def __init__(
+        self, path: Path, in_rate: int, tap: Callable[[int, np.ndarray], None] | None = None
+    ) -> None:
         self.path = path
+        self._tap = tap
         self.in_rate = in_rate
         self._resampler = soxr.ResampleStream(
             in_rate, audio_files.SAMPLE_RATE, 1, dtype="float32", quality="HQ"
@@ -127,6 +135,11 @@ class TrackWriter:
             return
         pcm = np.clip(frames * 32767.0, -32768, 32767).astype(np.int16)
         self._writer.writeframes(pcm.tobytes())
+        if self._tap is not None:
+            try:
+                self._tap(self.frames_written, frames.astype(np.float32, copy=False))
+            except Exception:  # noqa: BLE001 - the recording matters more than the preview
+                log.exception("Audio tap failed")
         self.frames_written += len(pcm)
 
 
@@ -231,6 +244,7 @@ class Recorder:
         directory: Path,
         mic: AudioDevice | None,
         system: list[AudioDevice],
+        tap: AudioTap | None = None,
     ):
         if mic is None and not system:
             raise ValueError("Choose at least one source to record")
@@ -241,6 +255,7 @@ class Recorder:
         self._mic = mic
         self._system = list(system)
         self.warnings: list[str] = []
+        self._tap = tap
 
     @property
     def has_mic(self) -> bool:
@@ -334,7 +349,10 @@ class Recorder:
     def _open_track(self, kind: str, device: AudioDevice, filename: str) -> None:
         import pyaudiowpatch as pa
 
-        track = _Track(kind, device, TrackWriter(self.directory / filename, device.rate))
+        tap = self._tap
+        track_tap = (lambda start, frames: tap(kind, start, frames)) if tap else None
+        writer = TrackWriter(self.directory / filename, device.rate, track_tap)
+        track = _Track(kind, device, writer)
         try:
             track.stream = self._pa.open(  # type: ignore[union-attr]
                 format=pa.paFloat32,

@@ -42,6 +42,12 @@ class RecordingSession:
         # Called with each meeting that finishes with usable audio (set by the
         # API to queue transcription).
         self.on_finished: Callable[[store.Meeting], None] | None = None
+        # Called when a recording starts and after it stops (whatever the result).
+        self.on_started: Callable[[store.Meeting], None] | None = None
+        self.on_stopped: Callable[[], None] | None = None
+        # Live transcript while recording (set by the API), and whether it's on.
+        self.live = None
+        self.live_enabled: Callable[[], bool] = lambda: False
         self._active: _Active | None = None
         self._lock = threading.Lock()
 
@@ -74,7 +80,13 @@ class RecordingSession:
                 mic_device=mic.name if mic else None,
                 system_device=_describe_outputs(system, system_id == ALL_OUTPUTS),
             )
-            recorder = self._recorder_factory(paths.meeting_dir(meeting.id), mic, system)
+            live = self.live if self.live is not None and self.live_enabled() else None
+            recorder = self._recorder_factory(
+                paths.meeting_dir(meeting.id),
+                mic,
+                system,
+                tap=live.feed if live is not None else None,
+            )
             try:
                 recorder.start()
             except Exception as exc:
@@ -90,6 +102,10 @@ class RecordingSession:
                 )
                 meeting = self.db.get_meeting(meeting.id) or meeting
             self._active = _Active(meeting, recorder)
+            if self.on_started is not None:
+                self.on_started(meeting)
+            if live is not None:
+                live.start(meeting.id)
             return meeting
 
     def pause(self) -> None:
@@ -115,9 +131,17 @@ class RecordingSession:
                 log.exception("Stopping the recorder failed")
                 duration_ms = active.recorder.clock.elapsed() * 1000
                 status = store.FAILED
+            if self.live is not None:
+                # Unload the live model before the final transcript needs the GPU.
+                self.live.stop()
             meeting = self.db.finish_meeting(active.meeting.id, int(duration_ms), status=status)
         if status == store.COMPLETED:
             self._notify_finished(meeting)
+        if self.on_stopped is not None:
+            try:
+                self.on_stopped()
+            except Exception:  # noqa: BLE001
+                log.exception("on_stopped hook failed")
         return meeting
 
     def shutdown(self) -> None:
@@ -142,6 +166,13 @@ class RecordingSession:
             "levels": recorder.levels(),
             "errors": recorder.errors(),
         }
+
+    def elapsed_ms(self, meeting_id: int) -> int | None:
+        """Current position in the recording, if this meeting is being recorded."""
+        active = self._active
+        if active is None or active.meeting.id != meeting_id:
+            return None
+        return int(active.recorder.clock.elapsed() * 1000)
 
     def is_recording(self, meeting_id: int) -> bool:
         active = self._active
