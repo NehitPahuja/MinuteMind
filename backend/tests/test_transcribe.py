@@ -93,7 +93,7 @@ def test_enqueue_ignores_duplicates(db: store.Store) -> None:
     q = TranscriptionQueue(db, FakeEngine(), lambda: GPU_PROFILE)  # worker not started
     assert q.enqueue(meeting_id) is True
     assert q.enqueue(meeting_id) is False
-    assert q.status() == {"current": None, "queued": [meeting_id]}
+    assert q.status() == {"current": None, "queued": [meeting_id], "paused": False}
     assert db.get_meeting(meeting_id).transcript_status == store.TRANSCRIPT_QUEUED  # type: ignore[union-attr]
 
 
@@ -138,3 +138,29 @@ def test_choose_profile(vram, cuda, preference, expected) -> None:
     profile = hardware.choose_profile(info, preference)
     assert profile.name == expected
     assert profile.device == ("cpu" if expected == "cpu" else "cuda")
+
+
+def test_model_download_retries_and_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stalled connection makes huggingface_hub raise; the download retries."""
+    import huggingface_hub
+
+    from minutemind import models
+
+    attempts: list[int] = []
+
+    def flaky_download(repo, local_dir, allow_patterns):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise TimeoutError("Read timed out")
+        local_dir.mkdir(parents=True, exist_ok=True)
+        (local_dir / "model.bin").write_bytes(b"x")
+        (local_dir / "config.json").write_text("{}")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", flaky_download)
+    monkeypatch.setattr(models, "_expected_bytes", lambda api, repo: 0)
+    monkeypatch.setattr(models.time, "sleep", lambda s: None)
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: None)
+
+    path = models.download_whisper("tiny")
+    assert len(attempts) == 3
+    assert models.is_downloaded("tiny") and path.name == "tiny"

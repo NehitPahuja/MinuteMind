@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Iterator
 
+import numpy as np
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from minutemind import store
+from minutemind import audio_files, store
 from minutemind.api import TOKEN_HEADER, create_app
 from minutemind.session import RecordingSession
 
@@ -15,8 +17,10 @@ from conftest import (
     MIC,
     OTHERS_SAID,
     YOU_SAID,
+    LIVE_YOU,
     FakeEngine,
     FakeHardwareCache,
+    FakeLiveEngine,
     FakeRecorder,
     fake_devices,
 )
@@ -30,10 +34,23 @@ def engine() -> FakeEngine:
 
 
 @pytest.fixture
-def client(db: store.Store, engine: FakeEngine) -> Iterator[TestClient]:
+def live_engine() -> FakeLiveEngine:
+    return FakeLiveEngine()
+
+
+@pytest.fixture
+def client(
+    db: store.Store, engine: FakeEngine, live_engine: FakeLiveEngine
+) -> Iterator[TestClient]:
     session = RecordingSession(db, recorder_factory=FakeRecorder, device_lister=fake_devices)
     app = create_app(
-        "test-token", db=db, session=session, engine=engine, hardware_cache=FakeHardwareCache()
+        "test-token",
+        db=db,
+        session=session,
+        engine=engine,
+        hardware_cache=FakeHardwareCache(),
+        live_engine=live_engine,
+        live_chunk_s=1.0,
     )
     with TestClient(app) as c:
         yield c
@@ -193,7 +210,11 @@ def test_transcribes_automatically_after_recording(client: TestClient) -> None:
 
 def test_auto_transcribe_can_be_turned_off(client: TestClient) -> None:
     res = client.patch("/settings", json={"auto_transcribe": False}, headers=AUTH)
-    assert res.json() == {"processing": "auto", "auto_transcribe": False}
+    assert res.json() == {
+        "processing": "auto",
+        "auto_transcribe": False,
+        "live_transcript": True,
+    }
     meeting_id = _record(client)
     assert client.app.state.transcriber.wait_idle()
     status = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()["status"]
@@ -218,6 +239,7 @@ def test_settings_validation(client: TestClient) -> None:
     assert client.get("/settings", headers=AUTH).json() == {
         "processing": "auto",
         "auto_transcribe": True,
+        "live_transcript": True,
     }
     assert client.patch("/settings", json={"processing": "gpu"}, headers=AUTH).json()[
         "processing"
@@ -236,8 +258,8 @@ def test_hardware_endpoint(client: TestClient) -> None:
 
 def test_websocket_streams_transcription_status(client: TestClient) -> None:
     with client.websocket_connect("/ws?token=test-token") as ws:
-        types = {ws.receive_json()["type"] for _ in range(2)}
-    assert types == {"recording", "transcription"}
+        types = {ws.receive_json()["type"] for _ in range(3)}
+    assert types == {"recording", "transcription", "live"}
 
 
 def test_deleting_a_meeting_deletes_its_transcript(client: TestClient, db: store.Store) -> None:
@@ -246,3 +268,85 @@ def test_deleting_a_meeting_deletes_its_transcript(client: TestClient, db: store
     assert db.get_segments(meeting_id)
     client.delete(f"/meetings/{meeting_id}", headers=AUTH)
     assert db.get_segments(meeting_id) == []
+
+
+# -- notes ---------------------------------------------------------------------
+
+
+def test_notes_during_and_after_a_recording(client: TestClient, db: store.Store) -> None:
+    client.post("/recording/start", json={"mic_device_id": MIC.id}, headers=AUTH)
+    meeting_id = client.get("/recording", headers=AUTH).json()["meeting"]["id"]
+
+    # While recording, the note is stamped with the current recording time.
+    first = client.post(f"/meetings/{meeting_id}/notes", json={"text": " Ask about budget "}, headers=AUTH)
+    assert first.status_code == 201
+    assert first.json()["text"] == "Ask about budget"
+    assert 0 <= first.json()["ts_ms"] < 5000
+
+    client.post("/recording/stop", headers=AUTH)
+    # Afterwards the time must be given (e.g. the player position).
+    assert client.post(
+        f"/meetings/{meeting_id}/notes", json={"text": "Later"}, headers=AUTH
+    ).status_code == 422
+    client.post(f"/meetings/{meeting_id}/notes", json={"text": "Early", "ts_ms": 0}, headers=AUTH)
+
+    notes = client.get(f"/meetings/{meeting_id}/notes", headers=AUTH).json()
+    assert [n["text"] for n in notes] == ["Early", "Ask about budget"] or [
+        n["text"] for n in notes
+    ] == ["Ask about budget", "Early"]
+    assert notes == sorted(notes, key=lambda n: (n["ts_ms"], n["id"]))
+
+    note_id = first.json()["id"]
+    edited = client.patch(f"/notes/{note_id}", json={"text": "Budget: 420/month", "ts_ms": 9000}, headers=AUTH)
+    assert edited.json()["text"] == "Budget: 420/month" and edited.json()["ts_ms"] == 9000
+    assert client.patch(f"/notes/{note_id}", json={"text": ""}, headers=AUTH).status_code == 422
+    assert client.delete(f"/notes/{note_id}", headers=AUTH).status_code == 204
+    assert client.delete(f"/notes/{note_id}", headers=AUTH).status_code == 404
+    assert client.patch("/notes/999", json={"text": "x"}, headers=AUTH).status_code == 404
+
+    client.delete(f"/meetings/{meeting_id}", headers=AUTH)
+    assert db.list_notes(meeting_id) == []  # notes go with the meeting
+
+
+# -- live transcript -------------------------------------------------------------
+
+
+def test_live_transcript_streams_over_the_websocket(
+    client: TestClient, live_engine: FakeLiveEngine
+) -> None:
+    client.post("/recording/start", json={"mic_device_id": MIC.id}, headers=AUTH)
+    live = client.app.state.live
+    # The fake recorder doesn't produce audio, so feed the live tap directly.
+    speech = np.full(int(audio_files.SAMPLE_RATE * 2.5), 0.1, np.float32)
+    live.feed("mic", 0, speech)
+
+    lines: list[dict] = []
+    with client.websocket_connect("/ws?token=test-token") as ws:
+        for _ in range(300):
+            message = ws.receive_json()
+            if message["type"] == "live":
+                lines.extend(message["lines"])
+                if lines:
+                    break
+    assert lines and lines[0]["source"] == "mic" and lines[0]["text"] == LIVE_YOU
+    assert live_engine.prepared == ["small"]  # the GPU profile uses the small model
+
+    client.post("/recording/stop", headers=AUTH)
+    assert live.snapshot()["state"] == "off"
+    assert live_engine.releases >= 1  # unloaded so the final pass gets the GPU
+
+
+def test_live_transcript_can_be_turned_off(client: TestClient, live_engine: FakeLiveEngine) -> None:
+    client.patch("/settings", json={"live_transcript": False}, headers=AUTH)
+    client.post("/recording/start", json={"mic_device_id": MIC.id}, headers=AUTH)
+    assert client.app.state.live.snapshot()["state"] == "off"
+    client.post("/recording/stop", headers=AUTH)
+    assert live_engine.prepared == []
+
+
+def test_final_transcripts_wait_while_recording(client: TestClient) -> None:
+    client.post("/recording/start", json={"mic_device_id": MIC.id}, headers=AUTH)
+    assert client.app.state.transcriber.status()["paused"] is True
+    client.post("/recording/stop", headers=AUTH)
+    assert client.app.state.transcriber.status()["paused"] is False
+    assert client.app.state.transcriber.wait_idle()

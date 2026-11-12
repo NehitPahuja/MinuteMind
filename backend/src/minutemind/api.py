@@ -32,6 +32,7 @@ from starlette.requests import HTTPConnection
 from minutemind import __version__, audio_files, hardware, models, paths, store
 from minutemind.capture import list_devices
 from minutemind.session import RecordingError, RecordingSession
+from minutemind.live import LiveEngine, LiveTranscriber, LiveWhisper
 from minutemind.transcribe import Engine, TranscriptionQueue, WhisperEngine
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,18 @@ class RenameMeeting(BaseModel):
 class SettingsUpdate(BaseModel):
     processing: Literal["auto", "gpu", "cpu"] | None = None
     auto_transcribe: bool | None = None
+    live_transcript: bool | None = None
+
+
+class NewNote(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
+    # Moment in the meeting. Omit while recording to use "now".
+    ts_ms: int | None = Field(default=None, ge=0)
+
+
+class NoteUpdate(BaseModel):
+    text: str | None = Field(default=None, min_length=1, max_length=5000)
+    ts_ms: int | None = Field(default=None, ge=0)
 
 
 class HardwareCache:
@@ -81,6 +94,8 @@ def create_app(
     session: RecordingSession | None = None,
     engine: Engine | None = None,
     hardware_cache: HardwareCache | None = None,
+    live_engine: LiveEngine | None = None,
+    live_chunk_s: float | None = None,
 ) -> FastAPI:
     if not token:
         raise ValueError("A non-empty session token is required")
@@ -109,11 +124,26 @@ def create_app(
         )
         app.state.profile = current_profile
 
+        manager_for_live = getattr(app.state.transcriber.engine, "manager", None)
+        live_kwargs = {"chunk_s": live_chunk_s} if live_chunk_s else {}
+        app.state.live = LiveTranscriber(
+            live_engine or LiveWhisper(manager_for_live or models.ModelManager()),
+            current_profile,
+            gpu_free=lambda: not app.state.transcriber.busy(),
+            **live_kwargs,
+        )
+
         def queue_if_enabled(meeting: store.Meeting) -> None:
             if app.state.db.get_settings()["auto_transcribe"]:
                 app.state.transcriber.enqueue(meeting.id)
 
-        app.state.session.on_finished = queue_if_enabled
+        session_ = app.state.session
+        session_.on_finished = queue_if_enabled
+        session_.live = app.state.live
+        session_.live_enabled = lambda: bool(app.state.db.get_settings()["live_transcript"])
+        # While recording, final transcripts wait so the live model gets the GPU.
+        session_.on_started = lambda _meeting: app.state.transcriber.pause()
+        session_.on_stopped = app.state.transcriber.resume
         recovered = app.state.session.recover_interrupted()
         if recovered:
             log.warning("Recovered interrupted recordings: %s", recovered)
@@ -251,6 +281,40 @@ def create_app(
             "segments": [s.to_dict() for s in get_db().get_segments(meeting_id)],
         }
 
+    # -- notes ---------------------------------------------------------------
+
+    @app.get("/meetings/{meeting_id}/notes")
+    def list_notes(meeting_id: int) -> list[dict]:
+        get_meeting_or_404(meeting_id)
+        return [n.to_dict() for n in get_db().list_notes(meeting_id)]
+
+    @app.post("/meetings/{meeting_id}/notes", status_code=status.HTTP_201_CREATED)
+    def add_note(meeting_id: int, body: NewNote) -> dict:
+        get_meeting_or_404(meeting_id)
+        ts_ms = body.ts_ms
+        if ts_ms is None:
+            ts_ms = get_session().elapsed_ms(meeting_id)
+        if ts_ms is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "ts_ms is required when the meeting isn't being recorded",
+            )
+        return get_db().add_note(meeting_id, ts_ms, body.text.strip()).to_dict()
+
+    @app.patch("/notes/{note_id}")
+    def update_note(note_id: int, body: NoteUpdate) -> dict:
+        if get_db().get_note(note_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Note not found")
+        text = body.text.strip() if body.text is not None else None
+        note = get_db().update_note(note_id, text=text, ts_ms=body.ts_ms)
+        assert note is not None
+        return note.to_dict()
+
+    @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_note(note_id: int) -> None:
+        if not get_db().delete_note(note_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Note not found")
+
     # -- system and settings -------------------------------------------------
 
     @app.get("/system/hardware")
@@ -291,10 +355,30 @@ def create_app(
     @app.websocket("/ws")
     async def live(ws: WebSocket) -> None:
         await ws.accept()
+        # The live transcript is sent incrementally: only lines this client
+        # hasn't seen yet, restarting when a new recording begins.
+        seen_meeting: int | None = None
+        sent = 0
         try:
             while True:
                 await ws.send_json({"type": "recording", **get_session().status()})
                 await ws.send_json({"type": "transcription", **app.state.transcriber.status()})
+                snap = app.state.live.snapshot()
+                reset = snap["meeting_id"] != seen_meeting
+                if reset:
+                    seen_meeting, sent = snap["meeting_id"], 0
+                fresh = app.state.live.snapshot(sent)
+                await ws.send_json(
+                    {
+                        "type": "live",
+                        "meeting_id": fresh["meeting_id"],
+                        "state": fresh["state"],
+                        "detail": fresh["detail"],
+                        "reset": reset,
+                        "lines": fresh["lines"],
+                    }
+                )
+                sent += len(fresh["lines"])
                 await asyncio.sleep(LEVELS_INTERVAL_S)
         except (WebSocketDisconnect, RuntimeError):
             return

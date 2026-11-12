@@ -9,7 +9,7 @@ Read this first in every new session, then [docs/PLAN.md](docs/PLAN.md). Update 
 | 0 | Foundations | Done |
 | 1 | Recording | Done (see the open check below) |
 | 2 | Transcription after the meeting | Done |
-| 3 | Live transcript and notes | Not started |
+| 3 | Live transcript and notes | Done |
 | 4 | Speaker labels | Not started |
 | 5 | Local AI and meeting minutes | Not started |
 | 6 | Search and Ask | Not started |
@@ -34,13 +34,26 @@ Checked with a 20-second test meeting made from two text-to-speech clips ("You" 
 - Processor only gave the same text in 38 s, including loading the model, so a long meeting on the CPU takes roughly twice its length.
 - Clicking a transcript line jumps the player there and highlights the line.
 
-## Next up: Phase 3, Live transcript and notes
+### Phase 3 results
 
-1. While recording, transcribe in rolling chunks of about 10 s with a small model (`small` int8 on the GPU, `base` on the CPU, per the hardware profile in `docs/PLAN.md`). The recorder's `TrackWriter` already has every block; add a tap that feeds a ring buffer per track. Keep the small model loaded through `ModelManager` only while recording, and make sure it can't collide with the final `large-v3-turbo` pass.
-2. Stream live lines to the UI over `/ws` (a new message type) and show them on the Record page under the meters, labeled You and Others.
-3. Notes: a timestamped notes editor on the Record page, saved to a new `notes` table (migration 3) with `ts_ms` taken from the recording clock. Show notes inline in the transcript at their time, and make them editable after the meeting.
-4. When the recording stops, the existing final pass replaces the live text. Live lines are never stored as the transcript.
-5. Done when: live text appears within about 15 s of speech, and notes show next to the matching moment in the transcript.
+Checked in the real app, with speech clips playing into the inaudible Voice Changer device and captured as "Others":
+
+- The live transcript showed lines about 10 s after speech (6 to 10 lines in 25 to 30 s), labeled You and Others.
+- A note typed 5 s into the recording was saved at 0:04 and appears at that point in the finished large-v3-turbo transcript.
+- Quiet or noisy microphone audio once made the live model switch to Urdu script. Live mode now locks onto the first confident language and drops lines Whisper rates as probably not speech.
+
+Live tests were run with `MINUTEMIND_LIVE_MODEL=tiny`, because the internet connection was too slow to fetch `small` in time. `small` was still downloading into `%APPDATA%\MinuteMind\models` at the end of the session; the download resumes if interrupted. **Next session: confirm `models/small` exists, then do one short real recording to check live quality with `small`.**
+
+**Privacy note for testing:** scripted recordings capture the real default microphone. Delete scratch data folders after testing, and unlink any `models` junctions first with `rmdir`, never `rm -rf`.
+
+## Next up: Phase 4, Speaker labels
+
+1. Settings: a Hugging Face token field, with links to accept the terms for `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`. Store the token in the backend settings table, or better, in Electron `safeStorage`, and pass it to the backend.
+2. Add `pyannote.audio` (torch with CUDA 12; check wheel availability on Windows and Python 3.12, and the size of the download).
+3. `diarize.py`: run pyannote on `system.wav` only. The mic track is already "You". Then assign each system segment, or each word using the stored word timings, to the speaker with the most overlap, and split segments where the speaker changes mid-line.
+4. Run diarization as a stage of the transcription job, after Whisper and with Whisper unloaded, and skip it with a clear message if there's no token. GPU memory: pyannote is about 1 GB.
+5. Migration 4: a `speakers` table (meeting_id, label, display_name) and a `speaker` column on segments. Rename speakers in the UI; a rename updates every line.
+6. Done when: a test call with two remote voices shows You, Speaker 1 and Speaker 2 correctly, and renaming a speaker updates the whole transcript. Windows text-to-speech has several voices (`SpeechSynthesizer.GetInstalledVoices()`), which is useful for making a two-voice test.
 
 ## Decisions made
 
@@ -62,13 +75,17 @@ Checked with a 20-second test meeting made from two text-to-speech clips ("You" 
 - **Hardware profile:** `hardware.detect()` uses `nvidia-smi`, CTranslate2's CUDA device count and `psutil`. `choose_profile()` maps it to gpu (3.8 GB or more of video memory), small_gpu (2 GB or more) or cpu, honouring the `processing` setting (auto, gpu, cpu). Detection is cached per backend run (`HardwareCache`).
 - **Settings:** a key/value `settings` table (migration 2) with defaults in `store.DEFAULT_SETTINGS`, exposed at `GET/PATCH /settings`.
 - **Transcript API:** `POST /meetings/{id}/transcribe` (202), `GET /meetings/{id}/transcript` (segments without words, for size; words are stored for later phases), `GET /system/hardware`. `/ws` now sends a `transcription` message alongside `recording`, and the UI reads it through `useTranscriptionJobs()`.
+- **Live transcript (Phase 3):** `capture.Recorder` takes an `AudioTap`, and each `TrackWriter` passes every 16 kHz chunk with its timeline position to `live.LiveTranscriber.feed`. A `LiveBuffer` per speaker sums overlapping output devices and forgets audio once transcribed. The worker transcribes about 10 s slices (`CHUNK_S`) cut at the quietest 0.2 s in the last 3 s, so words aren't split, and skips silent slices. It uses `small` on the GPU and `base` on the CPU (`live_model_for`, overridable with `MINUTEMIND_LIVE_MODEL`), with beam size 1 and the language lock above. Lines are append-only with stable ids, and `/ws` sends a `live` message with only new lines (`reset` when a new recording starts). The client sorts by `start_ms`. Live lines are never stored. The final pass replaces them.
+- **GPU sharing while recording:** `RecordingSession.on_started` pauses the `TranscriptionQueue`. A running job finishes, but new jobs wait. The live worker waits for `gpu_free()` (no job running) before loading its model. On stop, the session unloads the live model (`live.stop()`) before `on_finished` queues the final pass and `on_stopped` resumes the queue. The `live_transcript` setting turns it off.
+- **Notes:** migration 3 adds a `notes` table (`ts_ms`, `text`, cascade on meeting delete). `POST /meetings/{id}/notes` stamps the current recording time when `ts_ms` is omitted during a recording. After a meeting, `ts_ms` is required, and the UI sends the player position. There are also `PATCH` and `DELETE /notes/{id}`. The transcript view merges notes with spoken lines by time.
+- **Model downloads retry:** `models.download_whisper` retries up to 6 times with backoff, resuming partial files. A download that hangs without erroring can still stall. If that happens, restarting the process resumes it.
 - **Crash safety:** meetings left in `recording` or `paused` are fixed at startup by `RecordingSession.recover_interrupted()`, which repairs WAV headers, rebuilds the mix, and marks them `recovered`.
 - **Storage:** SQLite at `%APPDATA%\MinuteMind\minutemind.db`, with schema migrations as a list in `store.py` tracked by `PRAGMA user_version`. Never edit a shipped migration. Add a new one. Audio lives in `%APPDATA%\MinuteMind\meetings\<id>\`. `MINUTEMIND_DATA_DIR` overrides the folder, and the tests and UI test runs use it.
 - **Design system (black and grey):** tokens live in `app/src/renderer/src/assets/main.css` under `@theme`, on a true black background (`ink-950` is `#000000`) with neutral grey text. Fonts are bundled through Fontsource, not loaded from Google, so the app works offline. Fraunces is for headings (`.display`), Geist for UI text, and Geist Mono for timestamps, labels (`.eyebrow`) and status. Colour only where it means something: muted red (`signal`) for the record dot and errors, and muted green (`ok`) for a healthy engine. Everything else, including the active page, selected tabs, the player progress and focus outlines, is white or grey. The user asked for no neon or generic AI styling, so do not add glows, pulses, gradients or highlighter effects. The main canvas is plain black, with no background lines or patterns. `AudioPlayer` is a custom player, so transcript lines can seek it in Phase 2.
 
 ## Testing
 
-- **Backend:** `cd backend && uv run pytest` (59 tests, one of them needs real audio devices and skips without them). `tests/conftest.py` has a `FakeRecorder` for audio hardware, a `FakeEngine` for Whisper (it can simulate the GPU running out of memory) and a `FakeHardwareCache`. The API tests always inject these, so no test downloads a real model.
+- **Backend:** `cd backend && uv run pytest` (76 tests, one of them needs real audio devices and skips without them). `tests/conftest.py` has a `FakeRecorder` for audio hardware, a `FakeEngine` for Whisper (it can simulate the GPU running out of memory) and a `FakeHardwareCache`. The API tests always inject these, so no test downloads a real model.
 - **App:** `cd app && npm run typecheck && npm run lint && npm run build`.
 - **UI screenshots and scripted runs**, after `npm run build`, in `app/`:
   - Every page: `MINUTEMIND_SCREENSHOT_DIR=<folder> npx electron .`
@@ -76,6 +93,7 @@ Checked with a 20-second test meeting made from two text-to-speech clips ("You" 
   - Quitting mid-recording instead of pressing stop: also add `MINUTEMIND_SCREENSHOT_QUIT_WHILE_RECORDING=1`.
   - Open the newest meeting, wait for its transcript and click a line: `MINUTEMIND_SCREENSHOT_TRANSCRIPT=<max seconds>`. To test transcription without downloading the model again, link the scratch data folder's `models` to the real one: `mklink /J <scratch>\models %APPDATA%\MinuteMind\models`.
   - Speech samples for tests can be made with Windows text-to-speech (`System.Speech.Synthesis.SpeechSynthesizer`, 16 kHz mono 16-bit).
+  - To get speech into a recording without making noise, play WAVs into the "Voice Changer Virtual Audio Device" output with pyaudiowpatch. "All outputs" captures it as Others. With `MINUTEMIND_SCREENSHOT_RECORD`, the scripted recording also types a note 5 s in and logs how many live lines appeared.
   - Add new pages to the list in `app/src/main/devScreenshots.ts`.
 
 ## Known issues

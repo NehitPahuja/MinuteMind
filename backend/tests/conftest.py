@@ -74,6 +74,36 @@ class FakeEngine:
         self.releases += 1
 
 
+class FakeLiveEngine:
+    """Stands in for LiveWhisper: says LIVE_YOU or LIVE_OTHERS depending on
+    loudness, like FakeEngine. Records the models and devices it was asked for."""
+
+    def __init__(self, fail_on_gpu: bool = False):
+        self.fail_on_gpu = fail_on_gpu
+        self.calls: list[tuple[str, str, int]] = []  # (model, device, samples)
+        self.prepared: list[str] = []
+        self.releases = 0
+
+    def prepare(self, model, on_progress) -> None:
+        self.prepared.append(model)
+        on_progress(1.0)
+
+    def transcribe(self, audio, model, profile):
+        self.calls.append((model, profile.device, len(audio)))
+        if self.fail_on_gpu and profile.device == "cuda":
+            raise RuntimeError("CUDA failed with error out of memory")
+        seconds = len(audio) / audio_files.SAMPLE_RATE
+        loud = float(np.abs(audio).max()) > 0.3
+        return [RawSegment(0.05, seconds - 0.05, LIVE_OTHERS if loud else LIVE_YOU, [])]
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+LIVE_YOU = "live words from you"
+LIVE_OTHERS = "live words from the call"
+
+
 GPU_PROFILE = hardware.Profile("gpu", "cuda", "int8_float16", "GPU (Test GPU)")
 TEST_HARDWARE = hardware.HardwareInfo(
     gpu_name="Test GPU",
@@ -96,7 +126,14 @@ class FakeRecorder:
     # Device names that "fail to open", to test partial starts.
     broken: set[str] = set()
 
-    def __init__(self, directory: Path, mic: AudioDevice | None, system: list[AudioDevice]):
+    def __init__(
+        self,
+        directory: Path,
+        mic: AudioDevice | None,
+        system: list[AudioDevice],
+        tap=None,
+    ):
+        self.tap = tap
         self.directory = directory
         self.mic = mic
         self.system = [d for d in system if d.name not in self.broken]

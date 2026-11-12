@@ -45,6 +45,8 @@ export interface TranscriptionJobs {
     progress: number
   } | null
   queued: number[]
+  /** True while recording: final transcripts wait for the GPU. */
+  paused?: boolean
 }
 
 export interface HardwareReport {
@@ -63,6 +65,35 @@ export interface HardwareReport {
 export interface Settings {
   processing: 'auto' | 'gpu' | 'cpu'
   auto_transcribe: boolean
+  live_transcript: boolean
+}
+
+export interface Note {
+  id: number
+  meeting_id: number
+  /** Moment in the meeting the note refers to. */
+  ts_ms: number
+  text: string
+  created_at: string
+  updated_at: string
+}
+
+export interface LiveLine {
+  id: number
+  source: 'mic' | 'system'
+  start_ms: number
+  end_ms: number
+  text: string
+}
+
+export type LiveState = 'off' | 'starting' | 'waiting' | 'loading' | 'listening' | 'error'
+
+export interface LiveTranscript {
+  meetingId: number | null
+  state: LiveState
+  detail: string | null
+  /** Sorted by start time. */
+  lines: LiveLine[]
 }
 
 export interface AudioDevice {

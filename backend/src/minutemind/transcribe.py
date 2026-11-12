@@ -121,6 +121,11 @@ class TranscriptionQueue:
         self._current: dict | None = None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        # Cleared while recording, so the live transcript gets the GPU. A job
+        # already running finishes; new ones wait.
+        self._allowed = threading.Event()
+        self._allowed.set()
+        self._stopping = False
 
     # -- control -----------------------------------------------------------
 
@@ -131,7 +136,20 @@ class TranscriptionQueue:
         for meeting_id in self.db.pending_transcripts():
             self.enqueue(meeting_id)
 
+    def pause(self) -> None:
+        self._allowed.clear()
+
+    def resume(self) -> None:
+        self._allowed.set()
+
+    def busy(self) -> bool:
+        """True while a job is using the speech model."""
+        with self._lock:
+            return self._current is not None
+
     def stop(self, timeout: float = 5) -> None:
+        self._stopping = True
+        self._allowed.set()
         self._queue.put(None)
         if self._thread is not None:
             self._thread.join(timeout)
@@ -152,6 +170,7 @@ class TranscriptionQueue:
             return {
                 "current": dict(self._current) if self._current else None,
                 "queued": list(self._queued),
+                "paused": not self._allowed.is_set(),
             }
 
     def wait_idle(self, timeout: float = 60) -> bool:
@@ -172,6 +191,9 @@ class TranscriptionQueue:
         while True:
             meeting_id = self._queue.get()
             if meeting_id is None:
+                return
+            self._allowed.wait()
+            if self._stopping:
                 return
             with self._lock:
                 if meeting_id in self._queued:

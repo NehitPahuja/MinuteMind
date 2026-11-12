@@ -61,8 +61,12 @@ export async function captureScreenshotsIfRequested(
     const deadline = Date.now() + transcriptWait * 1000
     let lines = 0
     while (Date.now() < deadline) {
+      // Spoken lines are buttons directly inside the list item; notes are not.
       lines = Number(
-        await run(win, `document.querySelectorAll('section[aria-label="Transcript"] ol li').length`)
+        await run(
+          win,
+          `document.querySelectorAll('section[aria-label="Transcript"] ol li > button').length`
+        )
       )
       if (lines > 0) break
       await sleep(1000)
@@ -71,7 +75,7 @@ export async function captureScreenshotsIfRequested(
     await shoot('transcript.png')
     await run(
       win,
-      `document.querySelectorAll('section[aria-label="Transcript"] ol li button')[1]?.click()`
+      `document.querySelectorAll('section[aria-label="Transcript"] ol li > button')[1]?.click()`
     )
     await sleep(1500)
     const position = await run(win, `document.querySelector('audio')?.currentTime.toFixed(2)`)
@@ -90,7 +94,19 @@ export async function captureScreenshotsIfRequested(
         set.call(i, 'Screenshot test'); i.dispatchEvent(new Event('input', { bubbles: true })); })()`
     )
     await clickLabel(win, 'Start recording')
-    await sleep(recordSeconds * 1000)
+    // Type a note a few seconds in, as a user would.
+    await sleep(Math.min(5, recordSeconds / 2) * 1000)
+    await run(
+      win,
+      `(() => { const t = document.querySelector('textarea[aria-label="New note"]');
+        if (!t) return;
+        const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        set.call(t, 'Follow up on the hosting quote'); t.dispatchEvent(new Event('input', { bubbles: true }));
+        t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`
+    )
+    await sleep((recordSeconds - Math.min(5, recordSeconds / 2)) * 1000)
+    const liveLines = await run(win, `document.querySelectorAll('[aria-live="polite"] li').length`)
+    console.log(`[minutemind] live transcript lines: ${liveLines}`)
     await shoot('recording-live.png')
     if (process.env['MINUTEMIND_SCREENSHOT_QUIT_WHILE_RECORDING']) {
       // Quit mid-recording: the app must stop and save the meeting on its way out.
