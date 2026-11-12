@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { RecordingStatus } from '@shared/models'
+import type { RecordingStatus, TranscriptionJobs } from '@shared/models'
 import {
   EMPTY_HISTORY,
   IDLE_RECORDING,
   LEVEL_HISTORY,
+  NO_JOBS,
   RecordingContext,
   useBackend,
   type LevelHistory
@@ -12,9 +13,14 @@ import {
 interface LiveState {
   status: RecordingStatus
   history: LevelHistory
+  transcription: TranscriptionJobs
 }
 
-const INITIAL: LiveState = { status: IDLE_RECORDING, history: EMPTY_HISTORY }
+const INITIAL: LiveState = {
+  status: IDLE_RECORDING,
+  history: EMPTY_HISTORY,
+  transcription: NO_JOBS
+}
 
 /**
  * Keeps one WebSocket open to the backend and shares the live recording
@@ -34,10 +40,18 @@ export function RecordingProvider({ children }: { children: React.ReactNode }): 
     const connect = (): void => {
       ws = new WebSocket(client.wsUrl('/ws'))
       ws.onmessage = (event) => {
-        const { type, ...status } = JSON.parse(event.data as string) as {
-          type: string
-        } & RecordingStatus
-        if (type === 'recording') setLive((prev) => next(prev, status))
+        const { type, ...payload } = JSON.parse(event.data as string) as { type: string }
+        if (type === 'recording') {
+          setLive((prev) => next(prev, payload as RecordingStatus))
+        } else if (type === 'transcription') {
+          const jobs = payload as TranscriptionJobs
+          // Sent many times a second; only re-render when something changed.
+          setLive((prev) =>
+            JSON.stringify(prev.transcription) === JSON.stringify(jobs)
+              ? prev
+              : { ...prev, transcription: jobs }
+          )
+        }
       }
       ws.onclose = () => {
         if (!closed) retry = setTimeout(connect, 1000)
@@ -59,9 +73,10 @@ export function RecordingProvider({ children }: { children: React.ReactNode }): 
 
 function next(prev: LiveState, status: RecordingStatus): LiveState {
   const newMeeting = status.meeting?.id !== prev.status.meeting?.id
-  if (!status.levels) return { status, history: EMPTY_HISTORY }
+  if (!status.levels) return { ...prev, status, history: EMPTY_HISTORY }
   const base = newMeeting ? EMPTY_HISTORY : prev.history
   return {
+    ...prev,
     status,
     history: {
       mic: [...base.mic, status.levels.mic].slice(-LEVEL_HISTORY),

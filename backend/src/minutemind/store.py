@@ -6,6 +6,7 @@ the API's worker threads and the recorder thread at the same time.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from contextlib import contextmanager
@@ -25,6 +26,22 @@ FAILED = "failed"
 
 ACTIVE_STATUSES = (RECORDING, PAUSED)
 
+# Transcript status values.
+TRANSCRIPT_NONE = "none"
+TRANSCRIPT_QUEUED = "queued"
+TRANSCRIPT_RUNNING = "running"
+TRANSCRIPT_DONE = "done"
+TRANSCRIPT_FAILED = "failed"
+TRANSCRIPT_PENDING = (TRANSCRIPT_QUEUED, TRANSCRIPT_RUNNING)
+
+# Settings and their defaults. Values are stored as JSON.
+DEFAULT_SETTINGS: dict[str, object] = {
+    # "auto" picks GPU or CPU from the hardware; "gpu" / "cpu" force one.
+    "processing": "auto",
+    # Start transcribing as soon as a recording stops.
+    "auto_transcribe": True,
+}
+
 # Each entry upgrades the schema by one version. Never edit an entry once shipped.
 MIGRATIONS: list[str] = [
     """
@@ -39,6 +56,29 @@ MIGRATIONS: list[str] = [
         system_device TEXT,
         has_mic       INTEGER NOT NULL DEFAULT 0,
         has_system    INTEGER NOT NULL DEFAULT 0
+    );
+    """,
+    # 2: transcripts and settings
+    """
+    ALTER TABLE meetings ADD COLUMN transcript_status TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE meetings ADD COLUMN transcript_error TEXT;
+    ALTER TABLE meetings ADD COLUMN transcript_model TEXT;
+    ALTER TABLE meetings ADD COLUMN transcript_device TEXT;
+
+    CREATE TABLE segments (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        source     TEXT    NOT NULL,  -- 'mic' (you) or 'system' (others)
+        start_ms   INTEGER NOT NULL,
+        end_ms     INTEGER NOT NULL,
+        text       TEXT    NOT NULL,
+        words      TEXT    NOT NULL DEFAULT '[]'  -- JSON [[start_ms, end_ms, word], ...]
+    );
+    CREATE INDEX segments_by_meeting ON segments (meeting_id, start_ms);
+
+    CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
     );
     """,
 ]
@@ -56,9 +96,35 @@ class Meeting:
     system_device: str | None
     has_mic: bool
     has_system: bool
+    transcript_status: str = TRANSCRIPT_NONE
+    transcript_error: str | None = None
+    transcript_model: str | None = None
+    transcript_device: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class Segment:
+    source: str  # "mic" | "system"
+    start_ms: int
+    end_ms: int
+    text: str
+    words: list[tuple[int, int, str]]
+    id: int | None = None
+
+    def to_dict(self, with_words: bool = False) -> dict:
+        data = {
+            "id": self.id,
+            "source": self.source,
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "text": self.text,
+        }
+        if with_words:
+            data["words"] = [list(w) for w in self.words]
+        return data
 
 
 def _now() -> str:
@@ -188,6 +254,90 @@ class Store:
             ).fetchall()
         return [_row_to_meeting(r) for r in rows]
 
+    # -- transcripts ------------------------------------------------------
+
+    def set_transcript_status(
+        self,
+        meeting_id: int,
+        status: str,
+        error: str | None = None,
+        model: str | None = None,
+        device: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE meetings SET transcript_status = ?, transcript_error = ?,"
+                " transcript_model = COALESCE(?, transcript_model),"
+                " transcript_device = COALESCE(?, transcript_device) WHERE id = ?",
+                (status, error, model, device, meeting_id),
+            )
+
+    def pending_transcripts(self) -> list[int]:
+        """Meetings queued or mid-transcription (e.g. when the app last closed)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM meetings WHERE transcript_status IN (?, ?) ORDER BY id",
+                TRANSCRIPT_PENDING,
+            ).fetchall()
+        return [r["id"] for r in rows]
+
+    def replace_segments(self, meeting_id: int, segments: list[Segment]) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
+            conn.executemany(
+                "INSERT INTO segments (meeting_id, source, start_ms, end_ms, text, words)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        meeting_id,
+                        seg.source,
+                        seg.start_ms,
+                        seg.end_ms,
+                        seg.text,
+                        json.dumps([list(w) for w in seg.words]),
+                    )
+                    for seg in segments
+                ],
+            )
+
+    def get_segments(self, meeting_id: int) -> list[Segment]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM segments WHERE meeting_id = ? ORDER BY start_ms, id",
+                (meeting_id,),
+            ).fetchall()
+        return [
+            Segment(
+                id=r["id"],
+                source=r["source"],
+                start_ms=r["start_ms"],
+                end_ms=r["end_ms"],
+                text=r["text"],
+                words=[tuple(w) for w in json.loads(r["words"])],
+            )
+            for r in rows
+        ]
+
+    # -- settings ---------------------------------------------------------
+
+    def get_settings(self) -> dict[str, object]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        stored = {r["key"]: json.loads(r["value"]) for r in rows}
+        return {key: stored.get(key, default) for key, default in DEFAULT_SETTINGS.items()}
+
+    def update_settings(self, changes: dict[str, object]) -> dict[str, object]:
+        unknown = set(changes) - set(DEFAULT_SETTINGS)
+        if unknown:
+            raise KeyError(f"Unknown settings: {', '.join(sorted(unknown))}")
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO settings (key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [(key, json.dumps(value)) for key, value in changes.items()],
+            )
+        return self.get_settings()
+
 
 def _row_to_meeting(row: sqlite3.Row) -> Meeting:
     return Meeting(
@@ -201,4 +351,8 @@ def _row_to_meeting(row: sqlite3.Row) -> Meeting:
         system_device=row["system_device"],
         has_mic=bool(row["has_mic"]),
         has_system=bool(row["has_system"]),
+        transcript_status=row["transcript_status"],
+        transcript_error=row["transcript_error"],
+        transcript_model=row["transcript_model"],
+        transcript_device=row["transcript_device"],
     )

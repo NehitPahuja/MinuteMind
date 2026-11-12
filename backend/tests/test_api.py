@@ -10,15 +10,32 @@ from minutemind import store
 from minutemind.api import TOKEN_HEADER, create_app
 from minutemind.session import RecordingSession
 
-from conftest import LOOPBACK, MIC, FakeRecorder, fake_devices
+from conftest import (
+    LOOPBACK,
+    MIC,
+    OTHERS_SAID,
+    YOU_SAID,
+    FakeEngine,
+    FakeHardwareCache,
+    FakeRecorder,
+    fake_devices,
+)
 
 AUTH = {TOKEN_HEADER: "test-token"}
 
 
 @pytest.fixture
-def client(db: store.Store) -> Iterator[TestClient]:
+def engine() -> FakeEngine:
+    return FakeEngine()
+
+
+@pytest.fixture
+def client(db: store.Store, engine: FakeEngine) -> Iterator[TestClient]:
     session = RecordingSession(db, recorder_factory=FakeRecorder, device_lister=fake_devices)
-    with TestClient(create_app("test-token", db=db, session=session)) as c:
+    app = create_app(
+        "test-token", db=db, session=session, engine=engine, hardware_cache=FakeHardwareCache()
+    )
+    with TestClient(app) as c:
         yield c
 
 
@@ -152,3 +169,80 @@ def test_start_with_all_outputs(client: TestClient) -> None:
     bad = {"system_device_id": "everything"}
     client.post("/recording/stop", headers=AUTH)
     assert client.post("/recording/start", json=bad, headers=AUTH).status_code == 422
+
+
+def _record(client: TestClient) -> int:
+    body = {"mic_device_id": MIC.id, "system_device_id": "all"}
+    client.post("/recording/start", json=body, headers=AUTH)
+    return client.post("/recording/stop", headers=AUTH).json()["id"]
+
+
+def test_transcribes_automatically_after_recording(client: TestClient) -> None:
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    transcript = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()
+    assert transcript["status"] == "done"
+    assert transcript["device"] == "GPU"
+    assert transcript["model"] == "fake-whisper"
+    assert [(s["source"], s["text"]) for s in transcript["segments"]] == [
+        ("mic", YOU_SAID),
+        ("system", OTHERS_SAID),
+    ]
+    assert "words" not in transcript["segments"][0]
+
+
+def test_auto_transcribe_can_be_turned_off(client: TestClient) -> None:
+    res = client.patch("/settings", json={"auto_transcribe": False}, headers=AUTH)
+    assert res.json() == {"processing": "auto", "auto_transcribe": False}
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    status = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()["status"]
+    assert status == "none"
+
+    # ...and a transcript can still be requested by hand.
+    res = client.post(f"/meetings/{meeting_id}/transcribe", headers=AUTH)
+    assert res.status_code == 202
+    assert client.app.state.transcriber.wait_idle()
+    status = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()["status"]
+    assert status == "done"
+
+
+def test_transcribe_rejects_bad_requests(client: TestClient) -> None:
+    assert client.post("/meetings/999/transcribe", headers=AUTH).status_code == 404
+    client.post("/recording/start", json={"mic_device_id": MIC.id}, headers=AUTH)
+    meeting_id = client.get("/recording", headers=AUTH).json()["meeting"]["id"]
+    assert client.post(f"/meetings/{meeting_id}/transcribe", headers=AUTH).status_code == 409
+
+
+def test_settings_validation(client: TestClient) -> None:
+    assert client.get("/settings", headers=AUTH).json() == {
+        "processing": "auto",
+        "auto_transcribe": True,
+    }
+    assert client.patch("/settings", json={"processing": "gpu"}, headers=AUTH).json()[
+        "processing"
+    ] == "gpu"
+    assert client.patch("/settings", json={"processing": "fast"}, headers=AUTH).status_code == 422
+
+
+def test_hardware_endpoint(client: TestClient) -> None:
+    data = client.get("/system/hardware", headers=AUTH).json()
+    assert data["info"]["gpu_name"] == "Test GPU"
+    assert data["profile"]["name"] == "gpu"
+    client.patch("/settings", json={"processing": "cpu"}, headers=AUTH)
+    assert client.get("/system/hardware", headers=AUTH).json()["profile"]["name"] == "cpu"
+    assert data["model"]["name"] == "large-v3-turbo"
+
+
+def test_websocket_streams_transcription_status(client: TestClient) -> None:
+    with client.websocket_connect("/ws?token=test-token") as ws:
+        types = {ws.receive_json()["type"] for _ in range(2)}
+    assert types == {"recording", "transcription"}
+
+
+def test_deleting_a_meeting_deletes_its_transcript(client: TestClient, db: store.Store) -> None:
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    assert db.get_segments(meeting_id)
+    client.delete(f"/meetings/{meeting_id}", headers=AUTH)
+    assert db.get_segments(meeting_id) == []

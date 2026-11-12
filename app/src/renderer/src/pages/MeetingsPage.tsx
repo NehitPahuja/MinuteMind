@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AudioTrack, Meeting } from '@shared/models'
-import { AudioPlayer } from '../components/AudioPlayer'
+import { AudioPlayer, type PlayerHandle } from '../components/AudioPlayer'
 import { PageHeader } from '../components/PageHeader'
-import { useBackend, useRecording } from '../lib/contexts'
+import { TranscriptView } from '../components/TranscriptView'
+import { useBackend, useRecording, useTranscriptionJobs } from '../lib/contexts'
 import { formatDuration, formatWhen } from '../lib/format'
 
 const today = new Intl.DateTimeFormat('en-GB', {
@@ -25,11 +26,15 @@ export function MeetingsPage({
 }: MeetingsPageProps): React.JSX.Element {
   const { client } = useBackend()
   const recording = useRecording()
+  const jobs = useTranscriptionJobs()
   const [meetings, setMeetings] = useState<Meeting[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
 
-  // Reload when the backend connects and whenever a recording starts or stops.
+  // Reload when the backend connects, a recording starts or stops, or a
+  // transcription job starts or finishes.
   const recordingState = recording.state === 'idle' ? 'idle' : 'active'
+  const jobsKey = `${jobs.current?.meeting_id ?? ''}|${jobs.queued.join(',')}`
   useEffect(() => {
     if (!client) return
     let active = true
@@ -46,7 +51,7 @@ export function MeetingsPage({
     return () => {
       active = false
     }
-  }, [client, recordingState])
+  }, [client, recordingState, jobsKey, refreshKey])
 
   const update = (meeting: Meeting): void =>
     setMeetings((list) => list?.map((m) => (m.id === meeting.id ? meeting : m)) ?? null)
@@ -61,7 +66,7 @@ export function MeetingsPage({
       <PageHeader
         eyebrow="Library"
         title="Your meetings"
-        lede="Every recording lands here. Transcripts, notes and minutes join it in later phases."
+        lede="Every recording lands here and is transcribed automatically. Click any line of a transcript to hear it."
         aside={<p className="font-mono text-xs uppercase tracking-wider text-paper-500">{today}</p>}
       />
 
@@ -86,6 +91,7 @@ export function MeetingsPage({
               onToggle={() => onSelect(m.id === selectedId ? null : m.id)}
               onChanged={update}
               onDeleted={() => remove(m.id)}
+              onRefresh={() => setRefreshKey((k) => k + 1)}
             />
           ))}
         </ol>
@@ -121,6 +127,26 @@ const STATUS_NOTE: Partial<Record<Meeting['status'], { text: string; className: 
   failed: { text: 'Failed', className: 'text-signal' }
 }
 
+function transcriptNote(
+  meeting: Meeting,
+  jobs: ReturnType<typeof useTranscriptionJobs>
+): { text: string; className: string } | undefined {
+  const job = jobs.current?.meeting_id === meeting.id ? jobs.current : null
+  if (job) {
+    const pct = Math.round(job.progress * 100)
+    const text =
+      job.stage === 'downloading' ? `Downloading speech model ${pct}%` : `Transcribing ${pct}%`
+    return { text, className: 'text-paper-300' }
+  }
+  if (jobs.queued.includes(meeting.id)) {
+    return { text: 'Waiting to transcribe', className: 'text-paper-500' }
+  }
+  if (meeting.transcript_status === 'failed') {
+    return { text: 'Transcript failed', className: 'text-signal' }
+  }
+  return undefined
+}
+
 interface MeetingRowProps {
   meeting: Meeting
   open: boolean
@@ -128,6 +154,7 @@ interface MeetingRowProps {
   onToggle: () => void
   onChanged: (meeting: Meeting) => void
   onDeleted: () => void
+  onRefresh: () => void
 }
 
 function MeetingRow({
@@ -136,10 +163,12 @@ function MeetingRow({
   live,
   onToggle,
   onChanged,
-  onDeleted
+  onDeleted,
+  onRefresh
 }: MeetingRowProps): React.JSX.Element {
   const when = formatWhen(meeting.created_at)
-  const note = STATUS_NOTE[meeting.status]
+  const jobs = useTranscriptionJobs()
+  const note = STATUS_NOTE[meeting.status] ?? transcriptNote(meeting, jobs)
 
   return (
     <li className={`border-b border-line ${open ? 'bg-ink-900/80' : ''}`}>
@@ -169,7 +198,12 @@ function MeetingRow({
       </button>
 
       {open && !live && (
-        <MeetingDetail meeting={meeting} onChanged={onChanged} onDeleted={onDeleted} />
+        <MeetingDetail
+          meeting={meeting}
+          onChanged={onChanged}
+          onDeleted={onDeleted}
+          onRefresh={onRefresh}
+        />
       )}
       {open && live && (
         <p className="px-3 pb-5 pl-[134px] text-sm text-paper-500">
@@ -190,9 +224,17 @@ interface MeetingDetailProps {
   meeting: Meeting
   onChanged: (meeting: Meeting) => void
   onDeleted: () => void
+  onRefresh: () => void
 }
 
-function MeetingDetail({ meeting, onChanged, onDeleted }: MeetingDetailProps): React.JSX.Element {
+function MeetingDetail({
+  meeting,
+  onChanged,
+  onDeleted,
+  onRefresh
+}: MeetingDetailProps): React.JSX.Element {
+  const player = useRef<PlayerHandle>(null)
+  const [positionMs, setPositionMs] = useState(0)
   const { client } = useBackend()
   const [track, setTrack] = useState<AudioTrack>('mix')
   const [editing, setEditing] = useState(false)
@@ -271,8 +313,10 @@ function MeetingDetail({ meeting, onChanged, onDeleted }: MeetingDetailProps): R
           </div>
           {client && (
             <AudioPlayer
+              ref={player}
               src={client.audioUrl(meeting.id, track)}
               durationMs={meeting.duration_ms}
+              onTime={setPositionMs}
             />
           )}
           <p className="text-xs text-paper-700">
@@ -283,6 +327,12 @@ function MeetingDetail({ meeting, onChanged, onDeleted }: MeetingDetailProps): R
               .filter(Boolean)
               .join(' · ')}
           </p>
+          <TranscriptView
+            meeting={meeting}
+            positionMs={positionMs}
+            onSeek={(ms) => player.current?.playFrom(ms)}
+            onRequested={onRefresh}
+          />
         </>
       ) : (
         <p className="text-sm text-paper-500">No audio was saved for this meeting.</p>

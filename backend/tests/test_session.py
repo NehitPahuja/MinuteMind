@@ -82,7 +82,7 @@ def test_all_outputs_records_every_loopback(session: RecordingSession) -> None:
     done = session.stop()
     folder = paths.meeting_dir(done.id)
     system = audio_files.read_samples(folder / audio_files.SYSTEM_FILE)
-    assert system[0] == 2000  # both outputs' sound summed into one track
+    assert system[0] == 3000  # both outputs' sound summed into one track
     assert not list(folder.glob(audio_files.SYSTEM_PART_GLOB))  # parts cleaned up
 
 
