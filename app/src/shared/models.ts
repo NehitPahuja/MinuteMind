@@ -2,6 +2,8 @@
 
 export type MeetingStatus = 'recording' | 'paused' | 'completed' | 'recovered' | 'failed'
 
+export type TranscriptStatus = 'none' | 'queued' | 'running' | 'done' | 'failed'
+
 export interface Meeting {
   id: number
   title: string
@@ -13,6 +15,54 @@ export interface Meeting {
   system_device: string | null
   has_mic: boolean
   has_system: boolean
+  transcript_status: TranscriptStatus
+  transcript_error: string | null
+  transcript_model: string | null
+  transcript_device: string | null
+}
+
+export interface TranscriptSegment {
+  id: number
+  /** 'mic' is you, 'system' is the other people on the call. */
+  source: 'mic' | 'system'
+  start_ms: number
+  end_ms: number
+  text: string
+}
+
+export interface Transcript {
+  status: TranscriptStatus
+  error: string | null
+  model: string | null
+  device: string | null
+  segments: TranscriptSegment[]
+}
+
+export interface TranscriptionJobs {
+  current: {
+    meeting_id: number
+    stage: 'starting' | 'downloading' | 'transcribing'
+    progress: number
+  } | null
+  queued: number[]
+}
+
+export interface HardwareReport {
+  info: {
+    gpu_name: string | null
+    vram_total_mb: number | null
+    vram_free_mb: number | null
+    cuda_available: boolean
+    ram_total_mb: number
+    cpu_threads: number
+  }
+  profile: { name: 'gpu' | 'small_gpu' | 'cpu'; device: string; label: string }
+  model: { name: string; downloaded: boolean }
+}
+
+export interface Settings {
+  processing: 'auto' | 'gpu' | 'cpu'
+  auto_transcribe: boolean
 }
 
 export interface AudioDevice {

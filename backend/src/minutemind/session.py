@@ -39,6 +39,9 @@ class RecordingSession:
         self.db = db
         self._recorder_factory = recorder_factory
         self._list_devices = device_lister
+        # Called with each meeting that finishes with usable audio (set by the
+        # API to queue transcription).
+        self.on_finished: Callable[[store.Meeting], None] | None = None
         self._active: _Active | None = None
         self._lock = threading.Lock()
 
@@ -112,7 +115,10 @@ class RecordingSession:
                 log.exception("Stopping the recorder failed")
                 duration_ms = active.recorder.clock.elapsed() * 1000
                 status = store.FAILED
-            return self.db.finish_meeting(active.meeting.id, int(duration_ms), status=status)
+            meeting = self.db.finish_meeting(active.meeting.id, int(duration_ms), status=status)
+        if status == store.COMPLETED:
+            self._notify_finished(meeting)
+        return meeting
 
     def shutdown(self) -> None:
         """Called when the service exits: finish any recording cleanly."""
@@ -160,17 +166,27 @@ class RecordingSession:
                 audio_files.repair_header(track)
             mix = audio_files.mix_tracks(directory) if present else None
             duration = audio_files.duration_ms(mix) if mix else 0
-            self.db.finish_meeting(
+            finished = self.db.finish_meeting(
                 meeting.id,
                 duration,
                 status=store.RECOVERED if mix else store.FAILED,
                 has_mic=tracks[0].exists(),
                 has_system=tracks[1].exists(),
             )
+            if mix:
+                self._notify_finished(finished)
             recovered.append(meeting.id)
         return recovered
 
     # -- helpers -----------------------------------------------------------
+
+    def _notify_finished(self, meeting: store.Meeting) -> None:
+        if self.on_finished is None:
+            return
+        try:
+            self.on_finished(meeting)
+        except Exception:  # noqa: BLE001 - never lose a recording over this
+            log.exception("on_finished hook failed for meeting %s", meeting.id)
 
     def _require_active(self) -> _Active:
         if self._active is None:

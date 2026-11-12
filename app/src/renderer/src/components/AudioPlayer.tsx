@@ -1,16 +1,25 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { formatClock } from '../lib/format'
 
 const SPEEDS = [1, 1.25, 1.5, 2]
+
+/** Lets other components (the transcript) control playback. */
+export interface PlayerHandle {
+  /** Jump to a moment and start playing. */
+  playFrom: (ms: number) => void
+}
 
 interface AudioPlayerProps {
   src: string
   /** Known length from the database, shown before the file's metadata loads. */
   durationMs: number
+  /** Called as playback moves, with the position in milliseconds. */
+  onTime?: (ms: number) => void
+  ref?: React.Ref<PlayerHandle>
 }
 
 /** Play/pause, a scrubber, elapsed/total time and a speed toggle. */
-export function AudioPlayer({ src, durationMs }: AudioPlayerProps): React.JSX.Element {
+export function AudioPlayer({ src, durationMs, onTime, ref }: AudioPlayerProps): React.JSX.Element {
   const audio = useRef<HTMLAudioElement>(null)
   const [playing, setPlaying] = useState(false)
   const [position, setPosition] = useState(0)
@@ -33,7 +42,19 @@ export function AudioPlayer({ src, durationMs }: AudioPlayerProps): React.JSX.El
   const seek = (seconds: number): void => {
     if (audio.current) audio.current.currentTime = seconds
     setPosition(seconds)
+    onTime?.(seconds * 1000)
   }
+
+  useImperativeHandle(ref, () => ({
+    playFrom: (ms: number) => {
+      const el = audio.current
+      if (!el) return
+      el.currentTime = ms / 1000
+      setPosition(ms / 1000)
+      onTime?.(ms)
+      void el.play().catch((err: Error) => setError(err.message))
+    }
+  }))
 
   const progress = duration > 0 ? (position / duration) * 100 : 0
 
@@ -46,7 +67,10 @@ export function AudioPlayer({ src, durationMs }: AudioPlayerProps): React.JSX.El
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
-        onTimeUpdate={(e) => setPosition(e.currentTarget.currentTime)}
+        onTimeUpdate={(e) => {
+          setPosition(e.currentTarget.currentTime)
+          onTime?.(e.currentTarget.currentTime * 1000)
+        }}
         onLoadedMetadata={(e) => {
           if (Number.isFinite(e.currentTarget.duration)) setDuration(e.currentTarget.duration)
           setError(null)

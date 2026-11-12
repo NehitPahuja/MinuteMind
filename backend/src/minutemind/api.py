@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -28,9 +29,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from minutemind import __version__, audio_files, paths, store
+from minutemind import __version__, audio_files, hardware, models, paths, store
 from minutemind.capture import list_devices
 from minutemind.session import RecordingError, RecordingSession
+from minutemind.transcribe import Engine, TranscriptionQueue, WhisperEngine
 
 log = logging.getLogger(__name__)
 
@@ -54,10 +56,31 @@ class RenameMeeting(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+class SettingsUpdate(BaseModel):
+    processing: Literal["auto", "gpu", "cpu"] | None = None
+    auto_transcribe: bool | None = None
+
+
+class HardwareCache:
+    """Hardware detection is slow (nvidia-smi, loading CUDA), so do it once."""
+
+    def __init__(self) -> None:
+        self._info: hardware.HardwareInfo | None = None
+        self._lock = threading.Lock()
+
+    def info(self, refresh: bool = False) -> hardware.HardwareInfo:
+        with self._lock:
+            if self._info is None or refresh:
+                self._info = hardware.detect()
+            return self._info
+
+
 def create_app(
     token: str,
     db: store.Store | None = None,
     session: RecordingSession | None = None,
+    engine: Engine | None = None,
+    hardware_cache: HardwareCache | None = None,
 ) -> FastAPI:
     if not token:
         raise ValueError("A non-empty session token is required")
@@ -73,11 +96,31 @@ def create_app(
     async def lifespan(app: FastAPI):
         app.state.db = db or store.Store()
         app.state.session = session or RecordingSession(app.state.db)
+        app.state.hardware = hardware_cache or HardwareCache()
+
+        def current_profile() -> hardware.Profile:
+            preference = str(app.state.db.get_settings()["processing"])
+            return hardware.choose_profile(app.state.hardware.info(), preference)
+
+        app.state.transcriber = TranscriptionQueue(
+            app.state.db,
+            engine or WhisperEngine(models.ModelManager()),
+            current_profile,
+        )
+        app.state.profile = current_profile
+
+        def queue_if_enabled(meeting: store.Meeting) -> None:
+            if app.state.db.get_settings()["auto_transcribe"]:
+                app.state.transcriber.enqueue(meeting.id)
+
+        app.state.session.on_finished = queue_if_enabled
         recovered = app.state.session.recover_interrupted()
         if recovered:
             log.warning("Recovered interrupted recordings: %s", recovered)
+        app.state.transcriber.start()
         yield
         app.state.session.shutdown()
+        app.state.transcriber.stop()
 
     app = FastAPI(
         title="MinuteMind",
@@ -185,6 +228,52 @@ def create_app(
             raise HTTPException(status.HTTP_409_CONFLICT, "Stop the recording before deleting it")
         get_db().delete_meeting(meeting_id)
 
+    # -- transcripts -------------------------------------------------------
+
+    @app.post("/meetings/{meeting_id}/transcribe", status_code=status.HTTP_202_ACCEPTED)
+    def transcribe(meeting_id: int) -> dict:
+        meeting = get_meeting_or_404(meeting_id)
+        if get_session().is_recording(meeting_id):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Stop the recording first")
+        if not (meeting.has_mic or meeting.has_system):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This meeting has no audio")
+        app.state.transcriber.enqueue(meeting_id)
+        return get_meeting_or_404(meeting_id).to_dict()
+
+    @app.get("/meetings/{meeting_id}/transcript")
+    def transcript(meeting_id: int) -> dict:
+        meeting = get_meeting_or_404(meeting_id)
+        return {
+            "status": meeting.transcript_status,
+            "error": meeting.transcript_error,
+            "model": meeting.transcript_model,
+            "device": meeting.transcript_device,
+            "segments": [s.to_dict() for s in get_db().get_segments(meeting_id)],
+        }
+
+    # -- system and settings -------------------------------------------------
+
+    @app.get("/system/hardware")
+    def system_hardware(refresh: bool = False) -> dict:
+        info = app.state.hardware.info(refresh=refresh)
+        return {
+            "info": info.to_dict(),
+            "profile": app.state.profile().to_dict(),
+            "model": {
+                "name": models.TRANSCRIBE_MODEL,
+                "downloaded": models.is_downloaded(models.TRANSCRIBE_MODEL),
+            },
+        }
+
+    @app.get("/settings")
+    def get_settings() -> dict:
+        return get_db().get_settings()
+
+    @app.patch("/settings")
+    def update_settings(body: SettingsUpdate) -> dict:
+        changes = body.model_dump(exclude_none=True)
+        return get_db().update_settings(changes)
+
     @app.get("/meetings/{meeting_id}/audio/{track}")
     def audio(meeting_id: int, track: str) -> FileResponse:
         get_meeting_or_404(meeting_id)
@@ -205,6 +294,7 @@ def create_app(
         try:
             while True:
                 await ws.send_json({"type": "recording", **get_session().status()})
+                await ws.send_json({"type": "transcription", **app.state.transcriber.status()})
                 await asyncio.sleep(LEVELS_INTERVAL_S)
         except (WebSocketDisconnect, RuntimeError):
             return

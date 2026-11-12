@@ -12,6 +12,9 @@ import { join } from 'path'
  * MINUTEMIND_DATA_DIR at a scratch folder so test meetings don't land in your
  * real library. Add MINUTEMIND_SCREENSHOT_QUIT_WHILE_RECORDING=1 to quit the
  * app mid-recording instead of pressing stop.
+ *
+ * With MINUTEMIND_SCREENSHOT_TRANSCRIPT=<seconds> it opens the newest meeting,
+ * waits up to that long for its transcript, and clicks the second line.
  */
 const PAGES = [
   { file: 'meetings.png', button: 'Meetings' },
@@ -47,6 +50,33 @@ export async function captureScreenshotsIfRequested(
   for (const page of PAGES) {
     await clickSidebar(win, page.button)
     await shoot(page.file)
+  }
+
+  const transcriptWait = Number(process.env['MINUTEMIND_SCREENSHOT_TRANSCRIPT'] ?? 0)
+  if (transcriptWait > 0) {
+    // Open the newest meeting, wait for its transcript, then click a line.
+    await clickSidebar(win, 'Meetings')
+    await sleep(800)
+    await run(win, `document.querySelector('main ol > li > button')?.click()`)
+    const deadline = Date.now() + transcriptWait * 1000
+    let lines = 0
+    while (Date.now() < deadline) {
+      lines = Number(
+        await run(win, `document.querySelectorAll('section[aria-label="Transcript"] ol li').length`)
+      )
+      if (lines > 0) break
+      await sleep(1000)
+    }
+    console.log(`[minutemind] transcript lines: ${lines}`)
+    await shoot('transcript.png')
+    await run(
+      win,
+      `document.querySelectorAll('section[aria-label="Transcript"] ol li button')[1]?.click()`
+    )
+    await sleep(1500)
+    const position = await run(win, `document.querySelector('audio')?.currentTime.toFixed(2)`)
+    console.log(`[minutemind] clicked line 2, player at ${position}s`)
+    await shoot('transcript-playing.png')
   }
 
   const recordSeconds = Number(process.env['MINUTEMIND_SCREENSHOT_RECORD'] ?? 0)

@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { BackendStatus } from '@shared/backend'
-import type { RecordingStatus } from '@shared/models'
+import type { RecordingStatus, TranscriptionJobs } from '@shared/models'
 import type { BackendClient } from './client'
 
 // -- backend connection -------------------------------------------------------
@@ -33,7 +33,11 @@ export interface RecordingContextValue {
   status: RecordingStatus
   /** Recent level readings for the meters, newest last. */
   history: LevelHistory
+  /** Background transcription: the job running now and the queue. */
+  transcription: TranscriptionJobs
 }
+
+export const NO_JOBS: TranscriptionJobs = { current: null, queued: [] }
 
 export const IDLE_RECORDING: RecordingStatus = {
   state: 'idle',
@@ -47,7 +51,8 @@ export const EMPTY_HISTORY: LevelHistory = { mic: [], system: [] }
 
 export const RecordingContext = createContext<RecordingContextValue>({
   status: IDLE_RECORDING,
-  history: EMPTY_HISTORY
+  history: EMPTY_HISTORY,
+  transcription: NO_JOBS
 })
 
 export function useRecording(): RecordingStatus {
@@ -56,4 +61,8 @@ export function useRecording(): RecordingStatus {
 
 export function useLevelHistory(): LevelHistory {
   return useContext(RecordingContext).history
+}
+
+export function useTranscriptionJobs(): TranscriptionJobs {
+  return useContext(RecordingContext).transcription
 }
