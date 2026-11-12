@@ -42,7 +42,7 @@ Checked in the real app, with speech clips playing into the inaudible Voice Chan
 - A note typed 5 s into the recording was saved at 0:04 and appears at that point in the finished large-v3-turbo transcript.
 - Quiet or noisy microphone audio once made the live model switch to Urdu script. Live mode now locks onto the first confident language and drops lines Whisper rates as probably not speech.
 
-Live tests were run with `MINUTEMIND_LIVE_MODEL=tiny`, because the internet connection was too slow to fetch `small` in time. `small` was still downloading into `%APPDATA%\MinuteMind\models` at the end of the session; the download resumes if interrupted. **Next session: confirm `models/small` exists, then do one short real recording to check live quality with `small`.**
+Live tests were run with `MINUTEMIND_LIVE_MODEL=tiny`, because the connection was too slow to fetch `small` in time. `small` finished downloading afterwards (464 MB in `%APPDATA%\MinuteMind\models\small`, after resuming from a stalled transfer). On the RTX 3050 it transcribed the test clip correctly in 0.46 s per 9 s slice once loaded (about 5 s to load). A short real recording is still worth doing to judge live quality on real speech.
 
 **Privacy note for testing:** scripted recordings capture the real default microphone. Delete scratch data folders after testing, and unlink any `models` junctions first with `rmdir`, never `rm -rf`.
 
