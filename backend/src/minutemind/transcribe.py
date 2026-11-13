@@ -21,7 +21,7 @@ from typing import Callable, Protocol
 
 import numpy as np
 
-from minutemind import audio_files, hardware, models, paths, store
+from minutemind import audio_files, diarize, hardware, models, paths, store
 
 log = logging.getLogger(__name__)
 
@@ -112,11 +112,17 @@ class TranscriptionQueue:
         db: store.Store,
         engine: Engine,
         profile: Callable[[], hardware.Profile],
+        detector: diarize.Detector | None = None,
+        speakers_enabled: Callable[[], bool] = lambda: True,
     ) -> None:
         self.db = db
         self.engine = engine
+        self.detector = detector
+        self._speakers_enabled = speakers_enabled
         self._profile = profile
-        self._queue: queue.Queue[int | None] = queue.Queue()
+        # Jobs are (meeting_id, kind, num_speakers). kind is "full" (transcribe,
+        # then detect speakers) or "speakers" (detect speakers again only).
+        self._queue: queue.Queue[tuple[int, str, int | None] | None] = queue.Queue()
         self._queued: list[int] = []
         self._current: dict | None = None
         self._lock = threading.Lock()
@@ -156,14 +162,27 @@ class TranscriptionQueue:
 
     def enqueue(self, meeting_id: int) -> bool:
         """Queue a meeting. Returns False if it's already queued or running."""
+        if not self._reserve(meeting_id):
+            return False
+        self.db.set_transcript_status(meeting_id, store.TRANSCRIPT_QUEUED)
+        self._queue.put((meeting_id, "full", None))
+        return True
+
+    def enqueue_speakers(self, meeting_id: int, num_speakers: int | None = None) -> bool:
+        """Queue speaker detection alone (keeps the transcript). `num_speakers`
+        tells it how many people were on the other side, if known."""
+        if not self._reserve(meeting_id):
+            return False
+        self._queue.put((meeting_id, "speakers", num_speakers))
+        return True
+
+    def _reserve(self, meeting_id: int) -> bool:
         with self._lock:
             running = self._current and self._current["meeting_id"] == meeting_id
             if meeting_id in self._queued or running:
                 return False
             self._queued.append(meeting_id)
-        self.db.set_transcript_status(meeting_id, store.TRANSCRIPT_QUEUED)
-        self._queue.put(meeting_id)
-        return True
+            return True
 
     def status(self) -> dict:
         with self._lock:
@@ -189,21 +208,35 @@ class TranscriptionQueue:
 
     def _work(self) -> None:
         while True:
-            meeting_id = self._queue.get()
-            if meeting_id is None:
+            job = self._queue.get()
+            if job is None:
                 return
+            meeting_id, kind, num_speakers = job
             self._allowed.wait()
             if self._stopping:
                 return
             with self._lock:
                 if meeting_id in self._queued:
                     self._queued.remove(meeting_id)
-                self._current = {"meeting_id": meeting_id, "stage": "starting", "progress": 0.0}
+                self._current = {
+                    "meeting_id": meeting_id,
+                    "kind": kind,
+                    "stage": "starting",
+                    "progress": 0.0,
+                }
             try:
-                self._run(meeting_id)
+                if kind == "speakers":
+                    self._redo_speakers(meeting_id, num_speakers)
+                else:
+                    self._run(meeting_id)
             except Exception as exc:  # noqa: BLE001 - report it on the meeting
-                log.exception("Transcribing meeting %s failed", meeting_id)
-                self.db.set_transcript_status(meeting_id, store.TRANSCRIPT_FAILED, error=str(exc))
+                log.exception("Job %s for meeting %s failed", kind, meeting_id)
+                if kind == "speakers":
+                    self.db.set_speakers_status(meeting_id, store.SPEAKERS_FAILED, str(exc))
+                else:
+                    self.db.set_transcript_status(
+                        meeting_id, store.TRANSCRIPT_FAILED, error=str(exc)
+                    )
             finally:
                 with self._lock:
                     self._current = None
@@ -262,6 +295,14 @@ class TranscriptionQueue:
             done_s += len(audio) / audio_files.SAMPLE_RATE
 
         segments = merge_tracks(results.get("mic", []), results.get("system", []))
+        system_audio = dict(tracks).get("system")
+        if system_audio is not None and any(s.source == "system" for s in segments):
+            # Whisper is done; free the GPU before the (processor-based) speaker step.
+            self.engine.release()
+            segments = self._label_speakers(meeting_id, segments, system_audio, None)
+        else:
+            self.db.set_speakers(meeting_id, [])
+            self.db.set_speakers_status(meeting_id, store.SPEAKERS_NONE)
         self.db.replace_segments(meeting_id, segments)
         self.db.set_transcript_status(
             meeting_id,
@@ -269,6 +310,54 @@ class TranscriptionQueue:
             model=self.engine.model_name,
             device="GPU" if profile.device == "cuda" else "CPU",
         )
+
+
+    # -- speakers ------------------------------------------------------------
+
+    def _label_speakers(
+        self,
+        meeting_id: int,
+        segments: list[store.Segment],
+        system_audio: np.ndarray,
+        num_speakers: int | None,
+    ) -> list[store.Segment]:
+        """Detect who's who on the PC-sound track. Never fails the transcript:
+        if detection can't run, lines simply stay labeled "Others"."""
+        if self.detector is None or not self._speakers_enabled():
+            self.db.set_speakers(meeting_id, [])
+            self.db.set_speakers_status(meeting_id, store.SPEAKERS_NONE)
+            return segments
+        try:
+            self._update("speakers", 0.0)
+            self.detector.ensure_models(lambda p: self._update("speakers", p * 0.3))
+            self._update("speakers", 0.3)
+            turns = self.detector.detect(system_audio, num_speakers)
+            labeled = diarize.assign_speakers(segments, turns)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Speaker detection failed for meeting %s", meeting_id)
+            self.db.set_speakers_status(meeting_id, store.SPEAKERS_FAILED, str(exc))
+            return segments
+        labels = sorted(
+            {s.speaker for s in labeled if s.speaker},
+            key=lambda label: int(label[1:]),
+        )
+        self.db.set_speakers(meeting_id, labels)
+        self.db.set_speakers_status(meeting_id, store.SPEAKERS_DONE)
+        self._update("speakers", 1.0)
+        return labeled
+
+    def _redo_speakers(self, meeting_id: int, num_speakers: int | None) -> None:
+        path = paths.meeting_dir(meeting_id) / audio_files.SYSTEM_FILE
+        segments = self.db.get_segments(meeting_id)
+        if not path.exists() or not any(s.source == "system" for s in segments):
+            self.db.set_speakers_status(
+                meeting_id, store.SPEAKERS_FAILED, "There's no PC sound to tell speakers apart"
+            )
+            return
+        audio = audio_files.read_samples(path).astype(np.float32) / 32768.0
+        labeled = self._label_speakers(meeting_id, segments, audio, num_speakers)
+        if labeled is not segments:
+            self.db.replace_segments(meeting_id, labeled)
 
 
 # ---------------------------------------------------------------------------

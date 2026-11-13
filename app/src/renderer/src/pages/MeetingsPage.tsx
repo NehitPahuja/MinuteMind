@@ -135,7 +135,11 @@ function transcriptNote(
   if (job) {
     const pct = Math.round(job.progress * 100)
     const text =
-      job.stage === 'downloading' ? `Downloading speech model ${pct}%` : `Transcribing ${pct}%`
+      job.stage === 'downloading'
+        ? `Downloading speech model ${pct}%`
+        : job.stage === 'speakers'
+          ? `Telling speakers apart ${pct}%`
+          : `Transcribing ${pct}%`
     return { text, className: 'text-paper-300' }
   }
   if (jobs.queued.includes(meeting.id)) {

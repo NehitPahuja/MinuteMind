@@ -7,6 +7,7 @@ import pytest
 
 from minutemind import audio_files, hardware, store
 from minutemind.capture import ActiveClock, AudioDevice
+from minutemind.diarize import Turn
 from minutemind.transcribe import RawSegment
 
 
@@ -98,6 +99,29 @@ class FakeLiveEngine:
 
     def release(self) -> None:
         self.releases += 1
+
+
+class FakeDetector:
+    """Stands in for SherpaDetector. By default everyone on the PC-sound track
+    is one person; set `turns` to script who speaks when (in seconds)."""
+
+    def __init__(self, turns: list[Turn] | None = None, error: Exception | None = None):
+        self.turns = turns
+        self.error = error
+        self.calls: list[int | None] = []  # num_speakers per call
+        self.downloads = 0
+
+    def ensure_models(self, on_progress) -> None:
+        self.downloads += 1
+        on_progress(1.0)
+
+    def detect(self, audio, num_speakers):
+        self.calls.append(num_speakers)
+        if self.error is not None:
+            raise self.error
+        if self.turns is not None:
+            return self.turns
+        return [Turn(0.0, len(audio) / audio_files.SAMPLE_RATE, 0)]
 
 
 LIVE_YOU = "live words from you"

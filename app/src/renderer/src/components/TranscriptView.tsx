@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Meeting, Note, Transcript, TranscriptSegment } from '@shared/models'
+import type { Meeting, Note, Speaker, Transcript, TranscriptSegment } from '@shared/models'
 import { useBackend, useTranscriptionJobs } from '../lib/contexts'
 import { formatClock } from '../lib/format'
 
-const SPEAKER: Record<TranscriptSegment['source'], string> = { mic: 'You', system: 'Others' }
+/** Display name for a spoken line: "You", a detected person, or "Others". */
+function speakerName(seg: TranscriptSegment, names: Map<string, string>): string {
+  if (seg.source === 'mic') return 'You'
+  return (seg.speaker && names.get(seg.speaker)) || 'Others'
+}
 
 interface TranscriptViewProps {
   meeting: Meeting
@@ -27,9 +31,15 @@ export function TranscriptView({
   const [error, setError] = useState<string | null>(null)
 
   const job = jobs.current?.meeting_id === meeting.id ? jobs.current : null
+  // Detecting speakers again keeps the transcript on screen.
+  const redetecting = job?.kind === 'speakers'
   const queuedAt = jobs.queued.indexOf(meeting.id)
   // Refetch whenever this meeting's job starts, moves on or finishes.
-  const jobKey = job ? 'running' : queuedAt >= 0 ? 'queued' : meeting.transcript_status
+  const jobKey = job
+    ? `running-${job.kind}`
+    : queuedAt >= 0
+      ? 'queued'
+      : `${meeting.transcript_status}-${meeting.speakers_status}`
 
   useEffect(() => {
     if (!client) return
@@ -95,8 +105,29 @@ export function TranscriptView({
     }
   }
 
-  const status = job ? 'running' : queuedAt >= 0 ? 'queued' : transcript?.status
+  const speakersApi: SpeakersApi = {
+    rename: (label, name) => {
+      if (!client) return
+      client
+        .patch<Speaker[]>(`/meetings/${meeting.id}/speakers/${label}`, { display_name: name })
+        .then(
+          (speakers) => setTranscript((t) => (t ? { ...t, speakers } : t)),
+          (err: Error) => setError(err.message)
+        )
+    },
+    detect: (count) => {
+      if (!client) return
+      setError(null)
+      client
+        .post(`/meetings/${meeting.id}/speakers/detect`, { num_speakers: count })
+        .then(onRequested, (err: Error) => setError(err.message))
+    }
+  }
+
+  const status =
+    job && !redetecting ? 'running' : queuedAt >= 0 && !redetecting ? 'queued' : transcript?.status
   const segments = status === 'done' && transcript ? transcript.segments : []
+  const names = new Map((transcript?.speakers ?? []).map((sp) => [sp.label, sp.display_name]))
 
   return (
     <section aria-label="Transcript" className="space-y-4 pt-2">
@@ -109,7 +140,9 @@ export function TranscriptView({
         )}
       </div>
 
-      {status === 'running' && job && <JobProgress stage={job.stage} progress={job.progress} />}
+      {job && (status === 'running' || redetecting) && (
+        <JobProgress stage={job.stage} progress={job.progress} />
+      )}
 
       {status === 'queued' && (
         <p className="text-sm text-paper-500">
@@ -141,9 +174,18 @@ export function TranscriptView({
         <p className="text-sm text-paper-500">No speech was found in this recording.</p>
       )}
 
+      {status === 'done' && transcript && segments.some((sg) => sg.source === 'system') && (
+        <SpeakersBar
+          transcript={transcript}
+          busy={redetecting || queuedAt >= 0}
+          api={speakersApi}
+        />
+      )}
+
       {(segments.length > 0 || notes.length > 0) && (
         <Lines
           segments={segments}
+          names={names}
           notes={notes}
           positionMs={positionMs}
           onSeek={onSeek}
@@ -176,7 +218,9 @@ function JobProgress({ stage, progress }: { stage: string; progress: number }): 
       ? 'Downloading the speech model (one time only, about 1.5 GB)'
       : stage === 'transcribing'
         ? 'Transcribing'
-        : 'Preparing'
+        : stage === 'speakers'
+          ? 'Telling the people on the call apart'
+          : 'Preparing'
   const pct = Math.round(progress * 100)
   return (
     <div className="space-y-2" role="status">
@@ -195,8 +239,129 @@ type Item =
   | { kind: 'segment'; ms: number; key: string; segment: TranscriptSegment }
   | { kind: 'note'; ms: number; key: string; note: Note }
 
+interface SpeakersApi {
+  rename: (label: string, name: string) => void
+  detect: (count: number | null) => void
+}
+
+/** People on the call: click a name to rename. Giving two the same name merges them. */
+function SpeakersBar({
+  transcript,
+  busy,
+  api
+}: {
+  transcript: Transcript
+  busy: boolean
+  api: SpeakersApi
+}): React.JSX.Element {
+  const [count, setCount] = useState('auto')
+
+  return (
+    <div className="space-y-3 rounded-md border border-line bg-ink-850/60 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="eyebrow mr-1">People</span>
+        <span className="rounded-sm bg-ink-800 px-2 py-1 text-xs text-paper-300">You</span>
+        {transcript.speakers.map((sp) => (
+          <SpeakerChip
+            key={sp.label}
+            speaker={sp}
+            onRename={(name) => api.rename(sp.label, name)}
+          />
+        ))}
+        {transcript.speakers_status !== 'done' && (
+          <span className="text-xs text-paper-500">
+            {transcript.speakers_status === 'failed'
+              ? `Couldn't tell people apart${transcript.speakers_error ? `: ${transcript.speakers_error}` : ''}.`
+              : 'Not separated by person.'}
+          </span>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs text-paper-500">
+        <span>Wrong?</span>
+        <select
+          value={count}
+          onChange={(e) => setCount(e.target.value)}
+          disabled={busy}
+          aria-label="Number of other people on the call"
+          className="rounded-sm border border-line-strong bg-ink-900 px-1.5 py-0.5 text-paper-100 focus:border-paper-500 focus:outline-none"
+        >
+          <option value="auto">Count automatically</option>
+          {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
+            <option key={n} value={String(n)}>
+              {n} other {n === 1 ? 'person' : 'people'}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => api.detect(count === 'auto' ? null : Number(count))}
+          className="font-mono text-[11px] uppercase tracking-wider text-paper-500 hover:text-paper-100 disabled:opacity-40"
+        >
+          {busy ? 'Working…' : 'Detect again'}
+        </button>
+        <span className="text-paper-700">Tip: give two speakers the same name to merge them.</span>
+      </div>
+    </div>
+  )
+}
+
+function SpeakerChip({
+  speaker,
+  onRename
+}: {
+  speaker: Speaker
+  onRename: (name: string) => void
+}): React.JSX.Element {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(speaker.display_name)
+
+  const save = (): void => {
+    const name = draft.trim()
+    setEditing(false)
+    if (name && name !== speaker.display_name) onRename(name)
+    else setDraft(speaker.display_name)
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        maxLength={80}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') save()
+          if (e.key === 'Escape') {
+            setDraft(speaker.display_name)
+            setEditing(false)
+          }
+        }}
+        aria-label={`Rename ${speaker.display_name}`}
+        className="w-36 rounded-sm border border-paper-500 bg-ink-900 px-2 py-1 text-xs text-paper-50 focus:outline-none"
+      />
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        setDraft(speaker.display_name)
+        setEditing(true)
+      }}
+      title="Click to rename"
+      className="rounded-sm border border-line-strong px-2 py-1 text-xs text-paper-100 hover:border-paper-500"
+    >
+      {speaker.display_name}
+      <span className="ml-1.5 font-mono text-[10px] text-paper-700">{speaker.lines}</span>
+    </button>
+  )
+}
+
 interface LinesProps {
   segments: TranscriptSegment[]
+  names: Map<string, string>
   notes: Note[]
   positionMs: number
   onSeek: (ms: number) => void
@@ -204,7 +369,14 @@ interface LinesProps {
 }
 
 /** Spoken lines and notes, merged in meeting order. */
-function Lines({ segments, notes, positionMs, onSeek, notesApi }: LinesProps): React.JSX.Element {
+function Lines({
+  segments,
+  names,
+  notes,
+  positionMs,
+  onSeek,
+  notesApi
+}: LinesProps): React.JSX.Element {
   const items: Item[] = [
     ...segments.map((s) => ({
       kind: 'segment' as const,
@@ -230,7 +402,11 @@ function Lines({ segments, notes, positionMs, onSeek, notesApi }: LinesProps): R
   const showSpeaker = items.map((item, i) => {
     if (item.kind !== 'segment') return false
     const prev = items[i - 1]
-    return !prev || prev.kind !== 'segment' || prev.segment.source !== item.segment.source
+    return (
+      !prev ||
+      prev.kind !== 'segment' ||
+      speakerName(prev.segment, names) !== speakerName(item.segment, names)
+    )
   })
 
   return (
@@ -250,15 +426,18 @@ function Lines({ segments, notes, positionMs, onSeek, notesApi }: LinesProps): R
             <button
               type="button"
               onClick={() => onSeek(seg.start_ms)}
-              className={`grid w-full grid-cols-[52px_64px_1fr] gap-4 px-2 py-2 text-left text-sm leading-relaxed transition-colors ${
+              className={`grid w-full grid-cols-[52px_96px_1fr] gap-4 px-2 py-2 text-left text-sm leading-relaxed transition-colors ${
                 active ? 'bg-ink-800 text-paper-50' : 'text-paper-300 hover:bg-ink-850'
               }`}
             >
               <span className="pt-0.5 font-mono text-[11px] tabular-nums text-paper-500">
                 {formatClock(seg.start_ms).replace(/^00:/, '')}
               </span>
-              <span className="pt-0.5 font-mono text-[11px] uppercase tracking-wider text-paper-500">
-                {showSpeaker[i] ? SPEAKER[seg.source] : ''}
+              <span
+                className="truncate pt-0.5 font-mono text-[11px] uppercase tracking-wider text-paper-500"
+                title={speakerName(seg, names)}
+              >
+                {showSpeaker[i] ? speakerName(seg, names) : ''}
               </span>
               <span>{seg.text}</span>
             </button>
@@ -287,7 +466,7 @@ function NoteLine({ note, onSeek, notesApi }: NoteLineProps): React.JSX.Element 
   }
 
   return (
-    <div className="group grid grid-cols-[52px_64px_1fr_auto] gap-4 border-l border-paper-500 bg-ink-850/60 px-2 py-2 text-sm">
+    <div className="group grid grid-cols-[52px_96px_1fr_auto] gap-4 border-l border-paper-500 bg-ink-850/60 px-2 py-2 text-sm">
       <button
         type="button"
         onClick={() => onSeek(note.ts_ms)}

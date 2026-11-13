@@ -150,7 +150,7 @@ The app is built in nine phases, one or two working sessions each. Every phase e
 
 ## One-time setup the user will need
 - Install `uv`. No Ollama is needed.
-- Get a free Hugging Face token and accept the terms for `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`.
+- No Hugging Face token is needed: speaker labels use sherpa-onnx models from GitHub (see PROGRESS.md).
 - Optionally, add an Anthropic API key in Settings to use Claude.
 - The first run downloads the Whisper, embedding, pyannote and LLM models, about 4 GB in total.
 - If the prebuilt CUDA wheel for llama-cpp-python doesn't match, building it needs Visual Studio Build Tools with C++. The CPU wheel always works as a fallback.

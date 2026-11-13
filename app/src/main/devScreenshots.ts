@@ -81,6 +81,25 @@ export async function captureScreenshotsIfRequested(
     const position = await run(win, `document.querySelector('audio')?.currentTime.toFixed(2)`)
     console.log(`[minutemind] clicked line 2, player at ${position}s`)
     await shoot('transcript-playing.png')
+
+    // Rename the first detected speaker, if there is one.
+    const renamed = await run(
+      win,
+      `(async () => {
+        const chip = document.querySelector('button[title="Click to rename"]');
+        if (!chip) return 'no speakers';
+        chip.click();
+        await new Promise((r) => setTimeout(r, 200));
+        const input = document.querySelector('input[aria-label^="Rename"]');
+        const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        set.call(input, 'Priya'); input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        return 'renamed';
+      })()`
+    )
+    await sleep(800)
+    console.log(`[minutemind] speaker rename: ${renamed}`)
+    await shoot('transcript-renamed.png')
   }
 
   const recordSeconds = Number(process.env['MINUTEMIND_SCREENSHOT_RECORD'] ?? 0)
