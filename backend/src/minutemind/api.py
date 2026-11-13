@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from minutemind import __version__, audio_files, hardware, models, paths, store
+from minutemind import __version__, audio_files, diarize, hardware, models, paths, store
 from minutemind.capture import list_devices
 from minutemind.session import RecordingError, RecordingSession
 from minutemind.live import LiveEngine, LiveTranscriber, LiveWhisper
@@ -61,6 +61,16 @@ class SettingsUpdate(BaseModel):
     processing: Literal["auto", "gpu", "cpu"] | None = None
     auto_transcribe: bool | None = None
     live_transcript: bool | None = None
+    speaker_labels: bool | None = None
+
+
+class RenameSpeaker(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class DetectSpeakers(BaseModel):
+    # How many people were on the other side, if known; omit to detect it.
+    num_speakers: int | None = Field(default=None, ge=1, le=20)
 
 
 class NewNote(BaseModel):
@@ -96,6 +106,7 @@ def create_app(
     hardware_cache: HardwareCache | None = None,
     live_engine: LiveEngine | None = None,
     live_chunk_s: float | None = None,
+    detector: diarize.Detector | None = None,
 ) -> FastAPI:
     if not token:
         raise ValueError("A non-empty session token is required")
@@ -121,6 +132,8 @@ def create_app(
             app.state.db,
             engine or WhisperEngine(models.ModelManager()),
             current_profile,
+            detector=detector or diarize.SherpaDetector(),
+            speakers_enabled=lambda: bool(app.state.db.get_settings()["speaker_labels"]),
         )
         app.state.profile = current_profile
 
@@ -278,8 +291,27 @@ def create_app(
             "error": meeting.transcript_error,
             "model": meeting.transcript_model,
             "device": meeting.transcript_device,
+            "speakers_status": meeting.speakers_status,
+            "speakers_error": meeting.speakers_error,
+            "speakers": get_db().list_speakers(meeting_id),
             "segments": [s.to_dict() for s in get_db().get_segments(meeting_id)],
         }
+
+    @app.patch("/meetings/{meeting_id}/speakers/{label}")
+    def rename_speaker(meeting_id: int, label: str, body: RenameSpeaker) -> list[dict]:
+        get_meeting_or_404(meeting_id)
+        if not get_db().rename_speaker(meeting_id, label, body.display_name.strip()):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Speaker not found")
+        return get_db().list_speakers(meeting_id)
+
+    @app.post("/meetings/{meeting_id}/speakers/detect", status_code=status.HTTP_202_ACCEPTED)
+    def detect_speakers(meeting_id: int, body: DetectSpeakers) -> dict:
+        meeting = get_meeting_or_404(meeting_id)
+        if meeting.transcript_status != store.TRANSCRIPT_DONE:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Transcribe the meeting first")
+        if not app.state.transcriber.enqueue_speakers(meeting_id, body.num_speakers):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This meeting is already being processed")
+        return {"queued": True}
 
     # -- notes ---------------------------------------------------------------
 

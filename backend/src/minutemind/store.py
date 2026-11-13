@@ -42,7 +42,14 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "auto_transcribe": True,
     # Show a rough transcript while recording.
     "live_transcript": True,
+    # Tell apart the people on the other side of the call.
+    "speaker_labels": True,
 }
+
+# Speaker detection status values (per meeting).
+SPEAKERS_NONE = "none"
+SPEAKERS_DONE = "done"
+SPEAKERS_FAILED = "failed"
 
 # Each entry upgrades the schema by one version. Never edit an entry once shipped.
 MIGRATIONS: list[str] = [
@@ -95,6 +102,19 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX notes_by_meeting ON notes (meeting_id, ts_ms);
     """,
+    # 4: speakers on the other side of the call
+    """
+    ALTER TABLE segments ADD COLUMN speaker TEXT;  -- e.g. 'S1'; NULL for the mic ("you")
+    ALTER TABLE meetings ADD COLUMN speakers_status TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE meetings ADD COLUMN speakers_error TEXT;
+
+    CREATE TABLE speakers (
+        meeting_id   INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        label        TEXT    NOT NULL,
+        display_name TEXT    NOT NULL,
+        PRIMARY KEY (meeting_id, label)
+    );
+    """,
 ]
 
 
@@ -114,6 +134,8 @@ class Meeting:
     transcript_error: str | None = None
     transcript_model: str | None = None
     transcript_device: str | None = None
+    speakers_status: str = SPEAKERS_NONE
+    speakers_error: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -126,12 +148,14 @@ class Segment:
     end_ms: int
     text: str
     words: list[tuple[int, int, str]]
+    speaker: str | None = None  # "S1", "S2", ... for PC sound once detected
     id: int | None = None
 
     def to_dict(self, with_words: bool = False) -> dict:
         data = {
             "id": self.id,
             "source": self.source,
+            "speaker": self.speaker,
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
             "text": self.text,
@@ -299,8 +323,8 @@ class Store:
         with self._connect() as conn:
             conn.execute("DELETE FROM segments WHERE meeting_id = ?", (meeting_id,))
             conn.executemany(
-                "INSERT INTO segments (meeting_id, source, start_ms, end_ms, text, words)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO segments (meeting_id, source, start_ms, end_ms, text, words, speaker)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         meeting_id,
@@ -309,6 +333,7 @@ class Store:
                         seg.end_ms,
                         seg.text,
                         json.dumps([list(w) for w in seg.words]),
+                        seg.speaker,
                     )
                     for seg in segments
                 ],
@@ -328,9 +353,49 @@ class Store:
                 end_ms=r["end_ms"],
                 text=r["text"],
                 words=[tuple(w) for w in json.loads(r["words"])],
+                speaker=r["speaker"],
             )
             for r in rows
         ]
+
+    # -- speakers ---------------------------------------------------------
+
+    def set_speakers(self, meeting_id: int, labels: list[str]) -> None:
+        """Replace a meeting's speakers with fresh default names."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM speakers WHERE meeting_id = ?", (meeting_id,))
+            conn.executemany(
+                "INSERT INTO speakers (meeting_id, label, display_name) VALUES (?, ?, ?)",
+                [(meeting_id, label, f"Speaker {label[1:]}") for label in labels],
+            )
+
+    def list_speakers(self, meeting_id: int) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.label, s.display_name,"
+                " (SELECT COUNT(*) FROM segments g WHERE g.meeting_id = s.meeting_id"
+                "  AND g.speaker = s.label) AS lines"
+                " FROM speakers s WHERE s.meeting_id = ?"
+                " ORDER BY CAST(SUBSTR(s.label, 2) AS INTEGER)",
+                (meeting_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def rename_speaker(self, meeting_id: int, label: str, display_name: str) -> bool:
+        with self._connect() as conn:
+            return bool(
+                conn.execute(
+                    "UPDATE speakers SET display_name = ? WHERE meeting_id = ? AND label = ?",
+                    (display_name, meeting_id, label),
+                ).rowcount
+            )
+
+    def set_speakers_status(self, meeting_id: int, status: str, error: str | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE meetings SET speakers_status = ?, speakers_error = ? WHERE id = ?",
+                (status, error, meeting_id),
+            )
 
     # -- notes ------------------------------------------------------------
 
@@ -434,4 +499,6 @@ def _row_to_meeting(row: sqlite3.Row) -> Meeting:
         transcript_error=row["transcript_error"],
         transcript_model=row["transcript_model"],
         transcript_device=row["transcript_device"],
+        speakers_status=row["speakers_status"],
+        speakers_error=row["speakers_error"],
     )

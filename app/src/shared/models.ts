@@ -19,15 +19,25 @@ export interface Meeting {
   transcript_error: string | null
   transcript_model: string | null
   transcript_device: string | null
+  speakers_status: 'none' | 'done' | 'failed'
+  speakers_error: string | null
 }
 
 export interface TranscriptSegment {
   id: number
   /** 'mic' is you, 'system' is the other people on the call. */
   source: 'mic' | 'system'
+  /** For PC sound: which person ('S1', 'S2', ...), once speakers are detected. */
+  speaker: string | null
   start_ms: number
   end_ms: number
   text: string
+}
+
+export interface Speaker {
+  label: string
+  display_name: string
+  lines: number
 }
 
 export interface Transcript {
@@ -35,13 +45,17 @@ export interface Transcript {
   error: string | null
   model: string | null
   device: string | null
+  speakers_status: 'none' | 'done' | 'failed'
+  speakers_error: string | null
+  speakers: Speaker[]
   segments: TranscriptSegment[]
 }
 
 export interface TranscriptionJobs {
   current: {
     meeting_id: number
-    stage: 'starting' | 'downloading' | 'transcribing'
+    kind: 'full' | 'speakers'
+    stage: 'starting' | 'downloading' | 'transcribing' | 'speakers'
     progress: number
   } | null
   queued: number[]
@@ -66,6 +80,7 @@ export interface Settings {
   processing: 'auto' | 'gpu' | 'cpu'
   auto_transcribe: boolean
   live_transcript: boolean
+  speaker_labels: boolean
 }
 
 export interface Note {

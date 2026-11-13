@@ -10,7 +10,7 @@ Read this first in every new session, then [docs/PLAN.md](docs/PLAN.md). Update 
 | 1 | Recording | Done (see the open check below) |
 | 2 | Transcription after the meeting | Done |
 | 3 | Live transcript and notes | Done |
-| 4 | Speaker labels | Not started |
+| 4 | Speaker labels | Done |
 | 5 | Local AI and meeting minutes | Not started |
 | 6 | Search and Ask | Not started |
 | 7 | Claude option | Not started |
@@ -46,14 +46,22 @@ Live tests were run with `MINUTEMIND_LIVE_MODEL=tiny`, because the connection wa
 
 **Privacy note for testing:** scripted recordings capture the real default microphone. Delete scratch data folders after testing, and unlink any `models` junctions first with `rmdir`, never `rm -rf`.
 
-## Next up: Phase 4, Speaker labels
+### Phase 4 results
 
-1. Settings: a Hugging Face token field, with links to accept the terms for `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0`. Store the token in the backend settings table, or better, in Electron `safeStorage`, and pass it to the backend.
-2. Add `pyannote.audio` (torch with CUDA 12; check wheel availability on Windows and Python 3.12, and the size of the download).
-3. `diarize.py`: run pyannote on `system.wav` only. The mic track is already "You". Then assign each system segment, or each word using the stored word timings, to the speaker with the most overlap, and split segments where the speaker changes mid-line.
-4. Run diarization as a stage of the transcription job, after Whisper and with Whisper unloaded, and skip it with a clear message if there's no token. GPU memory: pyannote is about 1 GB.
-5. Migration 4: a `speakers` table (meeting_id, label, display_name) and a `speaker` column on segments. Rename speakers in the UI; a rename updates every line.
-6. Done when: a test call with two remote voices shows You, Speaker 1 and Speaker 2 correctly, and renaming a speaker updates the whole transcript. Windows text-to-speech has several voices (`SpeechSynthesizer.GetInstalledVoices()`), which is useful for making a two-voice test.
+Checked with a 40-second test call: three Windows text-to-speech voices on the PC-sound track (Zira, David, Hazel, David, Zira) plus a "You" line on the mic, run through real large-v3-turbo and real speaker detection:
+
+- All five turns went to the right person (Speaker 1 = Zira twice, Speaker 2 = David twice, Speaker 3 = Hazel), and the mic lines stayed "You". Transcription and speaker detection took 17 s.
+- Renaming Speaker 1 to "Priya" in the UI updated the chip and every one of her lines.
+- Re-detecting with a count works: told 2 people it merges the two female voices, told 3 it matches the truth.
+
+## Next up: Phase 5, Local AI and meeting minutes
+
+1. Install `llama-cpp-python`. Try the prebuilt CUDA 12 wheel first (`--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124` or newer; check which index supports Python 3.12 on Windows) and fall back to the CPU wheel. Building from source needs Visual Studio Build Tools, so avoid it. The connection has been slow at times (sometimes about 70 KB/s from Hugging Face), so check download speed first. The GitHub release download used for the speaker models was fast.
+2. Model: Qwen 2.5 3B Instruct GGUF Q4_K_M (about 2 GB) downloaded into `%APPDATA%\MinuteMind\models\`. Reuse the retrying download pattern. Consider `huggingface_hub.hf_hub_download` with `local_dir`, plus progress by watching bytes, as in `models.download_whisper`.
+3. `llm/` provider interface (`base.py`, `llamacpp.py`), loaded through `models.ModelManager` so it never shares the GPU with Whisper. Choose `n_gpu_layers` from the hardware profile: all layers on gpu, partial on small_gpu, 0 on cpu.
+4. `minutes.py`: summary, decisions, action items (task, owner, due) and topics as JSON constrained by a schema (llama.cpp `response_format` json_schema / grammar). Long meetings need chunking: summarize sections, then combine. Feed speaker names (from `list_speakers`) and notes into the prompt.
+5. Migration 5: a `minutes` table. A queue job kind "minutes" runs after transcription when a setting is on, plus `POST /meetings/{id}/minutes` to regenerate. A minutes view in the meeting detail, and Markdown export (save dialog through Electron IPC).
+6. Done when: minutes for the test meeting list its real decisions and action items, and `nvidia-smi` shows only one model using the GPU at a time.
 
 ## Decisions made
 
@@ -79,20 +87,23 @@ Live tests were run with `MINUTEMIND_LIVE_MODEL=tiny`, because the connection wa
 - **GPU sharing while recording:** `RecordingSession.on_started` pauses the `TranscriptionQueue`. A running job finishes, but new jobs wait. The live worker waits for `gpu_free()` (no job running) before loading its model. On stop, the session unloads the live model (`live.stop()`) before `on_finished` queues the final pass and `on_stopped` resumes the queue. The `live_transcript` setting turns it off.
 - **Notes:** migration 3 adds a `notes` table (`ts_ms`, `text`, cascade on meeting delete). `POST /meetings/{id}/notes` stamps the current recording time when `ts_ms` is omitted during a recording. After a meeting, `ts_ms` is required, and the UI sends the player position. There are also `PATCH` and `DELETE /notes/{id}`. The transcript view merges notes with spoken lines by time.
 - **Model downloads retry:** `models.download_whisper` retries up to 6 times with backoff, resuming partial files. A download that hangs without erroring can still stall. If that happens, restarting the process resumes it.
+- **Speaker labels (Phase 4), changed from the plan:** the plan said pyannote plus a Hugging Face token. pyannote needs PyTorch (2-3 GB) and the user would have to accept gated model terms. We use **sherpa-onnx** instead (`diarize.py`): the same pyannote segmentation-3.0 model exported to ONNX, plus a WeSpeaker ResNet34 (VoxCeleb, English) voice-fingerprint model, run on the processor through ONNX Runtime. No token, about 33 MB of models downloaded once from GitHub releases into `models/diarization/`, with a retrying, resuming urllib download. 8 threads take about 10% of real time.
+- **How speakers are assigned:** only `system.wav` is diarized, since the mic is "you". `assign_speakers` gives each word to the speaker overlapping it most (or the nearest, for words in gaps) and splits a line where the speaker changes. Lines with one speaker keep their original text and timing exactly. Speakers are labeled S1, S2... by first appearance. `CLUSTER_THRESHOLD = 0.3`: 0.4 merged two similar female voices and 0.2 over-split. Real voices may need tuning, and the UI offers "detect again" with a people count and merging by giving two speakers the same name.
+- **Speaker storage and jobs:** migration 4 adds `segments.speaker`, `meetings.speakers_status/speakers_error` and a `speakers` table (label, display_name). Detection is a stage of the transcription job (after Whisper, which is unloaded first) and never fails the transcript. If it fails, lines stay "Others". `TranscriptionQueue` jobs now have a kind: "full", or "speakers" (re-detect only, optional `num_speakers`). Routes: `PATCH /meetings/{id}/speakers/{label}` and `POST /meetings/{id}/speakers/detect`. The `speaker_labels` setting turns it off. Re-detecting resets names, because the numbering can change.
 - **Crash safety:** meetings left in `recording` or `paused` are fixed at startup by `RecordingSession.recover_interrupted()`, which repairs WAV headers, rebuilds the mix, and marks them `recovered`.
 - **Storage:** SQLite at `%APPDATA%\MinuteMind\minutemind.db`, with schema migrations as a list in `store.py` tracked by `PRAGMA user_version`. Never edit a shipped migration. Add a new one. Audio lives in `%APPDATA%\MinuteMind\meetings\<id>\`. `MINUTEMIND_DATA_DIR` overrides the folder, and the tests and UI test runs use it.
 - **Design system (black and grey):** tokens live in `app/src/renderer/src/assets/main.css` under `@theme`, on a true black background (`ink-950` is `#000000`) with neutral grey text. Fonts are bundled through Fontsource, not loaded from Google, so the app works offline. Fraunces is for headings (`.display`), Geist for UI text, and Geist Mono for timestamps, labels (`.eyebrow`) and status. Colour only where it means something: muted red (`signal`) for the record dot and errors, and muted green (`ok`) for a healthy engine. Everything else, including the active page, selected tabs, the player progress and focus outlines, is white or grey. The user asked for no neon or generic AI styling, so do not add glows, pulses, gradients or highlighter effects. The main canvas is plain black, with no background lines or patterns. `AudioPlayer` is a custom player, so transcript lines can seek it in Phase 2.
 
 ## Testing
 
-- **Backend:** `cd backend && uv run pytest` (76 tests, one of them needs real audio devices and skips without them). `tests/conftest.py` has a `FakeRecorder` for audio hardware, a `FakeEngine` for Whisper (it can simulate the GPU running out of memory) and a `FakeHardwareCache`. The API tests always inject these, so no test downloads a real model.
+- **Backend:** `cd backend && uv run pytest` (89 tests, one of them needs real audio devices and skips without them). `tests/conftest.py` has a `FakeRecorder` for audio hardware, a `FakeEngine` for Whisper (it can simulate the GPU running out of memory) and a `FakeHardwareCache`. The API tests always inject these, so no test downloads a real model.
 - **App:** `cd app && npm run typecheck && npm run lint && npm run build`.
 - **UI screenshots and scripted runs**, after `npm run build`, in `app/`:
   - Every page: `MINUTEMIND_SCREENSHOT_DIR=<folder> npx electron .`
   - Plus a real recording through the UI and a playback check: add `MINUTEMIND_SCREENSHOT_RECORD=<seconds>` and `MINUTEMIND_DATA_DIR=<scratch folder>`.
   - Quitting mid-recording instead of pressing stop: also add `MINUTEMIND_SCREENSHOT_QUIT_WHILE_RECORDING=1`.
   - Open the newest meeting, wait for its transcript and click a line: `MINUTEMIND_SCREENSHOT_TRANSCRIPT=<max seconds>`. To test transcription without downloading the model again, link the scratch data folder's `models` to the real one: `mklink /J <scratch>\models %APPDATA%\MinuteMind\models`.
-  - Speech samples for tests can be made with Windows text-to-speech (`System.Speech.Synthesis.SpeechSynthesizer`, 16 kHz mono 16-bit).
+  - Speech samples for tests can be made with Windows text-to-speech (`System.Speech.Synthesis.SpeechSynthesizer`, 16 kHz mono 16-bit). Installed voices: Microsoft David (male, US), Zira (female, US) and Hazel (female, UK), which is enough for multi-speaker tests. The transcript flow in the screenshot mode also renames the first speaker to "Priya".
   - To get speech into a recording without making noise, play WAVs into the "Voice Changer Virtual Audio Device" output with pyaudiowpatch. "All outputs" captures it as Others. With `MINUTEMIND_SCREENSHOT_RECORD`, the scripted recording also types a note 5 s in and logs how many live lines appeared.
   - Add new pages to the list in `app/src/main/devScreenshots.ts`.
 

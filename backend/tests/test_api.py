@@ -18,6 +18,7 @@ from conftest import (
     OTHERS_SAID,
     YOU_SAID,
     LIVE_YOU,
+    FakeDetector,
     FakeEngine,
     FakeHardwareCache,
     FakeLiveEngine,
@@ -39,8 +40,13 @@ def live_engine() -> FakeLiveEngine:
 
 
 @pytest.fixture
+def detector() -> FakeDetector:
+    return FakeDetector()
+
+
+@pytest.fixture
 def client(
-    db: store.Store, engine: FakeEngine, live_engine: FakeLiveEngine
+    db: store.Store, engine: FakeEngine, live_engine: FakeLiveEngine, detector: FakeDetector
 ) -> Iterator[TestClient]:
     session = RecordingSession(db, recorder_factory=FakeRecorder, device_lister=fake_devices)
     app = create_app(
@@ -51,6 +57,7 @@ def client(
         hardware_cache=FakeHardwareCache(),
         live_engine=live_engine,
         live_chunk_s=1.0,
+        detector=detector,
     )
     with TestClient(app) as c:
         yield c
@@ -214,6 +221,7 @@ def test_auto_transcribe_can_be_turned_off(client: TestClient) -> None:
         "processing": "auto",
         "auto_transcribe": False,
         "live_transcript": True,
+        "speaker_labels": True,
     }
     meeting_id = _record(client)
     assert client.app.state.transcriber.wait_idle()
@@ -240,6 +248,7 @@ def test_settings_validation(client: TestClient) -> None:
         "processing": "auto",
         "auto_transcribe": True,
         "live_transcript": True,
+        "speaker_labels": True,
     }
     assert client.patch("/settings", json={"processing": "gpu"}, headers=AUTH).json()[
         "processing"
@@ -350,3 +359,67 @@ def test_final_transcripts_wait_while_recording(client: TestClient) -> None:
     client.post("/recording/stop", headers=AUTH)
     assert client.app.state.transcriber.status()["paused"] is False
     assert client.app.state.transcriber.wait_idle()
+
+
+# -- speakers --------------------------------------------------------------------
+
+
+def test_transcript_includes_speakers(client: TestClient, detector: FakeDetector) -> None:
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    data = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()
+    assert data["speakers_status"] == "done"
+    assert data["speakers"] == [{"label": "S1", "display_name": "Speaker 1", "lines": 1}]
+    by_source = {s["source"]: s["speaker"] for s in data["segments"]}
+    assert by_source == {"mic": None, "system": "S1"}
+    assert detector.calls == [None]
+
+
+def test_rename_speaker(client: TestClient) -> None:
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    res = client.patch(
+        f"/meetings/{meeting_id}/speakers/S1", json={"display_name": " Priya "}, headers=AUTH
+    )
+    assert res.status_code == 200
+    assert res.json()[0]["display_name"] == "Priya"
+    speakers = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()["speakers"]
+    assert speakers[0]["display_name"] == "Priya"
+    assert client.patch(
+        f"/meetings/{meeting_id}/speakers/S9", json={"display_name": "X"}, headers=AUTH
+    ).status_code == 404
+    assert client.patch(
+        f"/meetings/{meeting_id}/speakers/S1", json={"display_name": ""}, headers=AUTH
+    ).status_code == 422
+
+
+def test_detect_speakers_again_with_a_count(client: TestClient, detector: FakeDetector) -> None:
+    client.patch("/settings", json={"auto_transcribe": False}, headers=AUTH)
+    meeting_id = _record(client)
+    # Not transcribed yet.
+    assert client.post(
+        f"/meetings/{meeting_id}/speakers/detect", json={}, headers=AUTH
+    ).status_code == 409
+    client.post(f"/meetings/{meeting_id}/transcribe", headers=AUTH)
+    assert client.app.state.transcriber.wait_idle()
+
+    res = client.post(
+        f"/meetings/{meeting_id}/speakers/detect", json={"num_speakers": 3}, headers=AUTH
+    )
+    assert res.status_code == 202
+    assert client.app.state.transcriber.wait_idle()
+    assert detector.calls == [None, 3]
+    assert client.post(
+        f"/meetings/{meeting_id}/speakers/detect", json={"num_speakers": 0}, headers=AUTH
+    ).status_code == 422
+
+
+def test_speaker_labels_can_be_turned_off(client: TestClient, detector: FakeDetector) -> None:
+    client.patch("/settings", json={"speaker_labels": False}, headers=AUTH)
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    data = client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()
+    assert data["status"] == "done"
+    assert data["speakers_status"] == "none"
+    assert data["speakers"] == []
+    assert detector.calls == []

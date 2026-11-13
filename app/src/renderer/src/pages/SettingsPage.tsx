@@ -5,11 +5,6 @@ import { useBackend } from '../lib/contexts'
 
 const LATER = [
   {
-    title: 'Speaker labels',
-    body: 'Hugging Face token for telling individual voices apart.',
-    phase: 4
-  },
-  {
     title: 'AI model',
     body: 'Built-in local model, or Claude with your own API key.',
     phase: 7
@@ -144,13 +139,24 @@ export function SettingsPage(): React.JSX.Element {
               />
               Show a live transcript while recording
             </label>
+            <label className="flex cursor-pointer items-center gap-3 text-sm text-paper-100">
+              <input
+                type="checkbox"
+                checked={settings?.speaker_labels ?? true}
+                disabled={!settings}
+                onChange={(e) => change({ speaker_labels: e.target.checked })}
+                className="h-4 w-4 accent-paper-100"
+              />
+              Tell apart the different people on the other side of the call
+            </label>
             <p className="text-xs leading-relaxed text-paper-500">
               Speech model: {hardware?.model.name ?? 'large-v3-turbo'}
               {hardware
                 ? hardware.model.downloaded
                   ? ', downloaded.'
                   : ', downloads once (about 1.5 GB) the first time you transcribe.'
-                : '.'}
+                : '.'}{' '}
+              Telling people apart runs on the processor and downloads about 33 MB once.
             </p>
           </div>
         </Row>
