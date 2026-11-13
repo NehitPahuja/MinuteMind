@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AudioTrack, Meeting } from '@shared/models'
 import { AudioPlayer, type PlayerHandle } from '../components/AudioPlayer'
+import { MinutesView } from '../components/MinutesView'
 import { PageHeader } from '../components/PageHeader'
 import { TranscriptView } from '../components/TranscriptView'
 import { useBackend, useRecording, useTranscriptionJobs } from '../lib/contexts'
@@ -139,14 +140,25 @@ function transcriptNote(
         ? `Downloading speech model ${pct}%`
         : job.stage === 'speakers'
           ? `Telling speakers apart ${pct}%`
-          : `Transcribing ${pct}%`
+          : job.stage === 'minutes-download'
+            ? `Downloading language model ${pct}%`
+            : job.stage === 'minutes'
+              ? `Writing minutes ${pct}%`
+              : `Transcribing ${pct}%`
     return { text, className: 'text-paper-300' }
   }
   if (jobs.queued.includes(meeting.id)) {
-    return { text: 'Waiting to transcribe', className: 'text-paper-500' }
+    const minutesOnly = meeting.transcript_status === 'done' && meeting.minutes_status === 'queued'
+    return {
+      text: minutesOnly ? 'Waiting to write minutes' : 'Waiting to transcribe',
+      className: 'text-paper-500'
+    }
   }
   if (meeting.transcript_status === 'failed') {
     return { text: 'Transcript failed', className: 'text-signal' }
+  }
+  if (meeting.minutes_status === 'failed') {
+    return { text: 'Minutes failed', className: 'text-signal' }
   }
   return undefined
 }
@@ -331,6 +343,11 @@ function MeetingDetail({
               .filter(Boolean)
               .join(' · ')}
           </p>
+          <MinutesView
+            meeting={meeting}
+            onSeek={(ms) => player.current?.playFrom(ms)}
+            onRequested={onRefresh}
+          />
           <TranscriptView
             meeting={meeting}
             positionMs={positionMs}

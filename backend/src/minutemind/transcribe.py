@@ -5,7 +5,9 @@ Each meeting's two tracks are transcribed separately: the mic track becomes
 When laptop speakers leak call audio into the microphone, the same words show
 up on both tracks; those duplicate mic lines are dropped.
 
-One job runs at a time on a worker thread. Progress is exposed through
+One job runs at a time on a worker thread, so the speech model and the
+language model (for minutes) never hold the GPU at the same time. A full job
+transcribes, labels speakers, then writes minutes. Progress is exposed through
 `status()` and streamed to the UI over the /ws WebSocket.
 """
 
@@ -21,7 +23,7 @@ from typing import Callable, Protocol
 
 import numpy as np
 
-from minutemind import audio_files, diarize, hardware, models, paths, store
+from minutemind import audio_files, diarize, hardware, minutes, models, paths, store
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +34,9 @@ SILENT_PEAK = 200
 # Mic lines this similar to an overlapping PC-sound line are speaker bleed.
 BLEED_SIMILARITY = 0.6
 BLEED_SLACK_MS = 1500
+# Whisper's silence filter can glue sentences separated by long silences into
+# one line. Lines are split where the gap between two words is longer than this.
+PAUSE_SPLIT_S = 1.5
 
 
 @dataclass(frozen=True)
@@ -114,14 +119,19 @@ class TranscriptionQueue:
         profile: Callable[[], hardware.Profile],
         detector: diarize.Detector | None = None,
         speakers_enabled: Callable[[], bool] = lambda: True,
+        writer: minutes.MinutesWriter | None = None,
+        minutes_enabled: Callable[[], bool] = lambda: True,
     ) -> None:
         self.db = db
         self.engine = engine
         self.detector = detector
+        self.writer = writer
+        self._minutes_enabled = minutes_enabled
         self._speakers_enabled = speakers_enabled
         self._profile = profile
         # Jobs are (meeting_id, kind, num_speakers). kind is "full" (transcribe,
-        # then detect speakers) or "speakers" (detect speakers again only).
+        # detect speakers, write minutes), "speakers" (detect speakers again
+        # only) or "minutes" (write the minutes again only).
         self._queue: queue.Queue[tuple[int, str, int | None] | None] = queue.Queue()
         self._queued: list[int] = []
         self._current: dict | None = None
@@ -141,6 +151,8 @@ class TranscriptionQueue:
         self._thread.start()
         for meeting_id in self.db.pending_transcripts():
             self.enqueue(meeting_id)
+        for meeting_id in self.db.pending_minutes():
+            self.enqueue_minutes(meeting_id)
 
     def pause(self) -> None:
         self._allowed.clear()
@@ -174,6 +186,14 @@ class TranscriptionQueue:
         if not self._reserve(meeting_id):
             return False
         self._queue.put((meeting_id, "speakers", num_speakers))
+        return True
+
+    def enqueue_minutes(self, meeting_id: int) -> bool:
+        """Queue writing (or rewriting) a meeting's minutes from its transcript."""
+        if not self._reserve(meeting_id):
+            return False
+        self.db.set_minutes_status(meeting_id, store.MINUTES_QUEUED)
+        self._queue.put((meeting_id, "minutes", None))
         return True
 
     def _reserve(self, meeting_id: int) -> bool:
@@ -227,12 +247,16 @@ class TranscriptionQueue:
             try:
                 if kind == "speakers":
                     self._redo_speakers(meeting_id, num_speakers)
+                elif kind == "minutes":
+                    self._write_minutes(meeting_id)
                 else:
                     self._run(meeting_id)
             except Exception as exc:  # noqa: BLE001 - report it on the meeting
                 log.exception("Job %s for meeting %s failed", kind, meeting_id)
                 if kind == "speakers":
                     self.db.set_speakers_status(meeting_id, store.SPEAKERS_FAILED, str(exc))
+                elif kind == "minutes":
+                    self.db.set_minutes_status(meeting_id, store.MINUTES_FAILED, str(exc))
                 else:
                     self.db.set_transcript_status(
                         meeting_id, store.TRANSCRIPT_FAILED, error=str(exc)
@@ -242,8 +266,10 @@ class TranscriptionQueue:
                     self._current = None
                     idle = not self._queued
                 if idle:
-                    # Free GPU memory for other apps (and, later, the language model).
+                    # Free GPU memory for other apps and the live transcript.
                     self.engine.release()
+                    if self.writer is not None:
+                        self.writer.release()
 
     def _update(self, stage: str, progress: float) -> None:
         with self._lock:
@@ -294,7 +320,9 @@ class TranscriptionQueue:
                 results[source] = self.engine.transcribe(audio, profile, progress)
             done_s += len(audio) / audio_files.SAMPLE_RATE
 
-        segments = merge_tracks(results.get("mic", []), results.get("system", []))
+        segments = merge_tracks(
+            split_at_pauses(results.get("mic", [])), split_at_pauses(results.get("system", []))
+        )
         system_audio = dict(tracks).get("system")
         if system_audio is not None and any(s.source == "system" for s in segments):
             # Whisper is done; free the GPU before the (processor-based) speaker step.
@@ -310,7 +338,57 @@ class TranscriptionQueue:
             model=self.engine.model_name,
             device="GPU" if profile.device == "cuda" else "CPU",
         )
+        if self.writer is not None and self._minutes_enabled():
+            # Whisper must be off the GPU before the language model loads.
+            self.engine.release()
+            self._write_minutes(meeting_id)
 
+    # -- minutes -------------------------------------------------------------
+
+    def _write_minutes(self, meeting_id: int) -> None:
+        """Write the meeting's minutes. A failure is recorded on the meeting and
+        never touches the transcript."""
+        if self.writer is None:
+            self.db.set_minutes_status(
+                meeting_id, store.MINUTES_FAILED, "No language model is set up"
+            )
+            return
+        try:
+            context = minutes.build_context(self.db, meeting_id)
+        except ValueError:
+            return  # the meeting was deleted
+        if not context.lines:
+            self.db.set_minutes_status(meeting_id, store.MINUTES_NONE)
+            return
+        self.db.set_minutes_status(meeting_id, store.MINUTES_RUNNING)
+        try:
+            self._update("minutes-download", 0.0)
+            self.writer.ensure_model(lambda p: self._update("minutes-download", p))
+            profile = self._profile()
+
+            def progress(p: float) -> None:
+                self._update("minutes", p)
+
+            self._update("minutes", 0.0)
+            try:
+                content = self.writer.write(context, profile, progress)
+            except Exception as exc:  # noqa: BLE001 - maybe a GPU problem
+                if profile.device == "cpu" or not is_gpu_failure(exc):
+                    raise
+                log.warning("Writing minutes on the GPU failed (%s); retrying on the CPU", exc)
+                self.writer.release()
+                profile = hardware.CPU_PROFILE
+                content = self.writer.write(context, profile, progress)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Writing minutes failed for meeting %s", meeting_id)
+            self.db.set_minutes_status(meeting_id, store.MINUTES_FAILED, str(exc))
+            return
+        self.db.save_minutes(
+            meeting_id,
+            content,
+            model=self.writer.model_name,
+            device="GPU" if profile.device == "cuda" else "CPU",
+        )
 
     # -- speakers ------------------------------------------------------------
 
@@ -362,6 +440,28 @@ class TranscriptionQueue:
 
 # ---------------------------------------------------------------------------
 # Combining the two tracks
+
+
+def split_at_pauses(segments: list[RawSegment], gap_s: float = PAUSE_SPLIT_S) -> list[RawSegment]:
+    """Split lines at long pauses between words, so each line keeps its own
+    time (otherwise a reply can appear before the question it answers)."""
+    out: list[RawSegment] = []
+    for seg in segments:
+        pieces: list[list[tuple[float, float, str]]] = []
+        for word in seg.words:
+            if pieces and word[0] - pieces[-1][-1][1] > gap_s:
+                pieces.append([])
+            if not pieces:
+                pieces.append([])
+            pieces[-1].append(word)
+        if len(pieces) <= 1:
+            out.append(seg)
+            continue
+        for words in pieces:
+            text = "".join(w[2] for w in words).strip()
+            if text:
+                out.append(RawSegment(words[0][0], words[-1][1], text, words))
+    return out
 
 
 def merge_tracks(mic: list[RawSegment], system: list[RawSegment]) -> list[store.Segment]:

@@ -30,6 +30,15 @@ export class BackendClient {
     return this.request<void>('DELETE', path)
   }
 
+  /** GET a plain-text response, such as a Markdown export. */
+  async getText(path: string): Promise<string> {
+    const res = await fetch(`${this.connection.baseUrl}${path}`, {
+      headers: { [TOKEN_HEADER]: this.connection.token }
+    })
+    if (!res.ok) throw new ApiError(res.status, `Request failed (${res.status})`)
+    return res.text()
+  }
+
   /** URL an <audio> element can load directly (token in the query string). */
   audioUrl(meetingId: number, track: AudioTrack): string {
     return `${this.connection.baseUrl}/meetings/${meetingId}/audio/${track}?token=${this.connection.token}`
