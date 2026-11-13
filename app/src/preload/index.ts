@@ -14,6 +14,10 @@ const api: MinuteMindApi = {
       ipcRenderer.on('backend:status', handler)
       return () => ipcRenderer.removeListener('backend:status', handler)
     }
+  },
+  files: {
+    saveText: (suggestedName: string, content: string): Promise<string | null> =>
+      ipcRenderer.invoke('files:save-text', suggestedName, content)
   }
 }
 

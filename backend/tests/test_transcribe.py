@@ -165,3 +165,30 @@ def test_model_download_retries_and_resumes(monkeypatch: pytest.MonkeyPatch) -> 
     path = models.download_whisper("tiny")
     assert len(attempts) == 3
     assert models.is_downloaded("tiny") and path.name == "tiny"
+
+
+def test_lines_are_split_at_long_pauses() -> None:
+    from minutemind.transcribe import split_at_pauses
+
+    glued = RawSegment(
+        0.4,
+        30.0,
+        "Thanks for joining. Agreed, March.",
+        [
+            (0.4, 0.8, " Thanks"),
+            (0.8, 1.0, " for"),
+            (1.0, 1.6, " joining."),
+            (20.0, 20.5, " Agreed,"),
+            (20.6, 30.0, " March."),
+        ],
+    )
+    normal = RawSegment(31.0, 32.0, "Short pause fine.", [(31.0, 31.3, " Short"), (32.5, 33.0, " pause")])
+    no_words = RawSegment(40.0, 41.0, "No words.", [])
+    out = split_at_pauses([glued, normal, no_words])
+    assert [(s.start, s.end, s.text) for s in out] == [
+        (0.4, 1.6, "Thanks for joining."),
+        (20.0, 30.0, "Agreed, March."),
+        (31.0, 32.0, "Short pause fine."),
+        (40.0, 41.0, "No words."),
+    ]
+    assert out[1].words == glued.words[3:]

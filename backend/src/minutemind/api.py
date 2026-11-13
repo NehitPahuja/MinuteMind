@@ -25,11 +25,12 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from minutemind import __version__, audio_files, diarize, hardware, models, paths, store
+from minutemind import __version__, audio_files, diarize, hardware, minutes, models, paths, store
+from minutemind.llm.base import LanguageModel
 from minutemind.capture import list_devices
 from minutemind.session import RecordingError, RecordingSession
 from minutemind.live import LiveEngine, LiveTranscriber, LiveWhisper
@@ -62,6 +63,7 @@ class SettingsUpdate(BaseModel):
     auto_transcribe: bool | None = None
     live_transcript: bool | None = None
     speaker_labels: bool | None = None
+    auto_minutes: bool | None = None
 
 
 class RenameSpeaker(BaseModel):
@@ -107,6 +109,7 @@ def create_app(
     live_engine: LiveEngine | None = None,
     live_chunk_s: float | None = None,
     detector: diarize.Detector | None = None,
+    language_model: LanguageModel | None = None,
 ) -> FastAPI:
     if not token:
         raise ValueError("A non-empty session token is required")
@@ -128,19 +131,29 @@ def create_app(
             preference = str(app.state.db.get_settings()["processing"])
             return hardware.choose_profile(app.state.hardware.info(), preference)
 
+        # One manager for every model, so only one is ever loaded at a time.
+        manager = getattr(engine, "manager", None) or models.ModelManager()
+        if language_model is None:
+            from minutemind.llm.llamacpp import LlamaCppModel
+
+            llm: LanguageModel = LlamaCppModel(manager)
+        else:
+            llm = language_model
+        app.state.llm = llm
         app.state.transcriber = TranscriptionQueue(
             app.state.db,
-            engine or WhisperEngine(models.ModelManager()),
+            engine or WhisperEngine(manager),
             current_profile,
             detector=detector or diarize.SherpaDetector(),
             speakers_enabled=lambda: bool(app.state.db.get_settings()["speaker_labels"]),
+            writer=minutes.MinutesWriter(llm),
+            minutes_enabled=lambda: bool(app.state.db.get_settings()["auto_minutes"]),
         )
         app.state.profile = current_profile
 
-        manager_for_live = getattr(app.state.transcriber.engine, "manager", None)
         live_kwargs = {"chunk_s": live_chunk_s} if live_chunk_s else {}
         app.state.live = LiveTranscriber(
-            live_engine or LiveWhisper(manager_for_live or models.ModelManager()),
+            live_engine or LiveWhisper(manager),
             current_profile,
             gpu_free=lambda: not app.state.transcriber.busy(),
             **live_kwargs,
@@ -313,6 +326,42 @@ def create_app(
             raise HTTPException(status.HTTP_409_CONFLICT, "This meeting is already being processed")
         return {"queued": True}
 
+    # -- minutes -------------------------------------------------------------
+
+    @app.get("/meetings/{meeting_id}/minutes")
+    def get_minutes(meeting_id: int) -> dict:
+        meeting = get_meeting_or_404(meeting_id)
+        saved = get_db().get_minutes(meeting_id)
+        return {
+            "status": meeting.minutes_status,
+            "error": meeting.minutes_error,
+            "minutes": saved["content"] if saved else None,
+            "model": saved["model"] if saved else None,
+            "device": saved["device"] if saved else None,
+            "created_at": saved["created_at"] if saved else None,
+        }
+
+    @app.post("/meetings/{meeting_id}/minutes", status_code=status.HTTP_202_ACCEPTED)
+    def write_minutes(meeting_id: int) -> dict:
+        meeting = get_meeting_or_404(meeting_id)
+        if meeting.transcript_status != store.TRANSCRIPT_DONE:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Transcribe the meeting first")
+        if not get_db().get_segments(meeting_id):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Nothing was said in this meeting")
+        if not app.state.transcriber.enqueue_minutes(meeting_id):
+            raise HTTPException(status.HTTP_409_CONFLICT, "This meeting is already being processed")
+        return get_meeting_or_404(meeting_id).to_dict()
+
+    @app.get("/meetings/{meeting_id}/minutes.md", response_class=PlainTextResponse)
+    def minutes_markdown(meeting_id: int) -> PlainTextResponse:
+        meeting = get_meeting_or_404(meeting_id)
+        saved = get_db().get_minutes(meeting_id)
+        if saved is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "This meeting has no minutes yet")
+        return PlainTextResponse(
+            minutes.to_markdown(meeting, saved["content"]), media_type="text/markdown"
+        )
+
     # -- notes ---------------------------------------------------------------
 
     @app.get("/meetings/{meeting_id}/notes")
@@ -358,6 +407,11 @@ def create_app(
             "model": {
                 "name": models.TRANSCRIBE_MODEL,
                 "downloaded": models.is_downloaded(models.TRANSCRIBE_MODEL),
+            },
+            "llm": {
+                "name": app.state.llm.name,
+                "local": app.state.llm.local,
+                "downloaded": _llm_downloaded(app.state.llm),
             },
         }
 
@@ -416,3 +470,8 @@ def create_app(
             return
 
     return app
+
+
+def _llm_downloaded(llm: LanguageModel) -> bool:
+    spec = getattr(llm, "spec", None)
+    return models.is_llm_downloaded(spec) if spec is not None else True

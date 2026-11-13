@@ -31,15 +31,22 @@ export function TranscriptView({
   const [error, setError] = useState<string | null>(null)
 
   const job = jobs.current?.meeting_id === meeting.id ? jobs.current : null
-  // Detecting speakers again keeps the transcript on screen.
+  // Writing minutes happens after the transcript is saved, so it stays on screen.
+  const writingMinutes = job !== null && job.stage.startsWith('minutes')
+  // Detecting speakers again keeps the transcript on screen too.
   const redetecting = job?.kind === 'speakers'
+  const keepShowing = redetecting || writingMinutes
   const queuedAt = jobs.queued.indexOf(meeting.id)
+  const queuedForMinutes =
+    queuedAt >= 0 && meeting.transcript_status === 'done' && meeting.minutes_status === 'queued'
   // Refetch whenever this meeting's job starts, moves on or finishes.
-  const jobKey = job
-    ? `running-${job.kind}`
-    : queuedAt >= 0
-      ? 'queued'
-      : `${meeting.transcript_status}-${meeting.speakers_status}`
+  const jobKey = writingMinutes
+    ? 'minutes'
+    : job
+      ? `running-${job.kind}`
+      : queuedAt >= 0 && !queuedForMinutes
+        ? 'queued'
+        : `${meeting.transcript_status}-${meeting.speakers_status}`
 
   useEffect(() => {
     if (!client) return
@@ -125,7 +132,11 @@ export function TranscriptView({
   }
 
   const status =
-    job && !redetecting ? 'running' : queuedAt >= 0 && !redetecting ? 'queued' : transcript?.status
+    job && !keepShowing
+      ? 'running'
+      : queuedAt >= 0 && !keepShowing && !queuedForMinutes
+        ? 'queued'
+        : transcript?.status
   const segments = status === 'done' && transcript ? transcript.segments : []
   const names = new Map((transcript?.speakers ?? []).map((sp) => [sp.label, sp.display_name]))
 
@@ -177,7 +188,7 @@ export function TranscriptView({
       {status === 'done' && transcript && segments.some((sg) => sg.source === 'system') && (
         <SpeakersBar
           transcript={transcript}
-          busy={redetecting || queuedAt >= 0}
+          busy={job !== null || queuedAt >= 0}
           api={speakersApi}
         />
       )}
@@ -195,7 +206,9 @@ export function TranscriptView({
 
       <AddNote positionMs={positionMs} onAdd={notesApi.add} />
 
-      {status === 'done' && <ActionButton onClick={request}>Transcribe again</ActionButton>}
+      {status === 'done' && !job && queuedAt < 0 && (
+        <ActionButton onClick={request}>Transcribe again</ActionButton>
+      )}
 
       {error && <p className="text-xs text-signal">{error}</p>}
     </section>

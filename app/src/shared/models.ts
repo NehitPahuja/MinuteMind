@@ -21,6 +21,33 @@ export interface Meeting {
   transcript_device: string | null
   speakers_status: 'none' | 'done' | 'failed'
   speakers_error: string | null
+  minutes_status: MinutesStatus
+  minutes_error: string | null
+}
+
+export type MinutesStatus = 'none' | 'queued' | 'running' | 'done' | 'failed'
+
+export interface ActionItem {
+  task: string
+  owner: string | null
+  due: string | null
+}
+
+export interface MinutesContent {
+  summary: string
+  decisions: string[]
+  action_items: ActionItem[]
+  /** start_ms is where the topic begins, when the model gave a usable time. */
+  topics: { title: string; start_ms: number | null }[]
+}
+
+export interface MinutesReport {
+  status: MinutesStatus
+  error: string | null
+  minutes: MinutesContent | null
+  model: string | null
+  device: string | null
+  created_at: string | null
 }
 
 export interface TranscriptSegment {
@@ -54,8 +81,8 @@ export interface Transcript {
 export interface TranscriptionJobs {
   current: {
     meeting_id: number
-    kind: 'full' | 'speakers'
-    stage: 'starting' | 'downloading' | 'transcribing' | 'speakers'
+    kind: 'full' | 'speakers' | 'minutes'
+    stage: 'starting' | 'downloading' | 'transcribing' | 'speakers' | 'minutes-download' | 'minutes'
     progress: number
   } | null
   queued: number[]
@@ -74,6 +101,7 @@ export interface HardwareReport {
   }
   profile: { name: 'gpu' | 'small_gpu' | 'cpu'; device: string; label: string }
   model: { name: string; downloaded: boolean }
+  llm: { name: string; local: boolean; downloaded: boolean }
 }
 
 export interface Settings {
@@ -81,6 +109,7 @@ export interface Settings {
   auto_transcribe: boolean
   live_transcript: boolean
   speaker_labels: boolean
+  auto_minutes: boolean
 }
 
 export interface Note {

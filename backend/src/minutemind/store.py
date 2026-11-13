@@ -44,12 +44,22 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "live_transcript": True,
     # Tell apart the people on the other side of the call.
     "speaker_labels": True,
+    # Write minutes with the local AI once the transcript is ready.
+    "auto_minutes": True,
 }
 
 # Speaker detection status values (per meeting).
 SPEAKERS_NONE = "none"
 SPEAKERS_DONE = "done"
 SPEAKERS_FAILED = "failed"
+
+# Minutes status values (per meeting).
+MINUTES_NONE = "none"
+MINUTES_QUEUED = "queued"
+MINUTES_RUNNING = "running"
+MINUTES_DONE = "done"
+MINUTES_FAILED = "failed"
+MINUTES_PENDING = (MINUTES_QUEUED, MINUTES_RUNNING)
 
 # Each entry upgrades the schema by one version. Never edit an entry once shipped.
 MIGRATIONS: list[str] = [
@@ -115,6 +125,19 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (meeting_id, label)
     );
     """,
+    # 5: meeting minutes written by the language model
+    """
+    ALTER TABLE meetings ADD COLUMN minutes_status TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE meetings ADD COLUMN minutes_error TEXT;
+
+    CREATE TABLE minutes (
+        meeting_id INTEGER PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+        content    TEXT NOT NULL,  -- JSON: summary, decisions, action_items, topics
+        model      TEXT NOT NULL,
+        device     TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    """,
 ]
 
 
@@ -136,6 +159,8 @@ class Meeting:
     transcript_device: str | None = None
     speakers_status: str = SPEAKERS_NONE
     speakers_error: str | None = None
+    minutes_status: str = MINUTES_NONE
+    minutes_error: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -397,6 +422,54 @@ class Store:
                 (status, error, meeting_id),
             )
 
+    # -- minutes ----------------------------------------------------------
+
+    def set_minutes_status(self, meeting_id: int, status: str, error: str | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE meetings SET minutes_status = ?, minutes_error = ? WHERE id = ?",
+                (status, error, meeting_id),
+            )
+
+    def save_minutes(self, meeting_id: int, content: dict, model: str, device: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO minutes (meeting_id, content, model, device, created_at)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT(meeting_id) DO UPDATE SET"
+                " content = excluded.content, model = excluded.model,"
+                " device = excluded.device, created_at = excluded.created_at",
+                (meeting_id, json.dumps(content), model, device, _now()),
+            )
+            conn.execute(
+                "UPDATE meetings SET minutes_status = ?, minutes_error = NULL WHERE id = ?",
+                (MINUTES_DONE, meeting_id),
+            )
+
+    def get_minutes(self, meeting_id: int) -> dict | None:
+        """The saved minutes with when and how they were written, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM minutes WHERE meeting_id = ?", (meeting_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "content": json.loads(row["content"]),
+            "model": row["model"],
+            "device": row["device"],
+            "created_at": row["created_at"],
+        }
+
+    def pending_minutes(self) -> list[int]:
+        """Meetings whose minutes were queued or being written (e.g. when the app last closed)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM meetings WHERE minutes_status IN (?, ?)"
+                " AND transcript_status NOT IN (?, ?) ORDER BY id",
+                (*MINUTES_PENDING, *TRANSCRIPT_PENDING),
+            ).fetchall()
+        return [r["id"] for r in rows]
+
     # -- notes ------------------------------------------------------------
 
     def add_note(self, meeting_id: int, ts_ms: int, text: str) -> Note:
@@ -501,4 +574,6 @@ def _row_to_meeting(row: sqlite3.Row) -> Meeting:
         transcript_device=row["transcript_device"],
         speakers_status=row["speakers_status"],
         speakers_error=row["speakers_error"],
+        minutes_status=row["minutes_status"],
+        minutes_error=row["minutes_error"],
     )

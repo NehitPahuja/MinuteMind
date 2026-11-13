@@ -1,5 +1,6 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
-import { join } from 'path'
+import { app, shell, BrowserWindow, dialog, ipcMain } from 'electron'
+import { writeFile } from 'fs/promises'
+import { basename, join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { BackendManager } from './backend'
@@ -49,6 +50,9 @@ app.whenReady().then(() => {
   ipcMain.handle('backend:get-status', () => backend.getStatus())
   ipcMain.handle('backend:get-connection', () => backend.getConnection())
   ipcMain.handle('backend:restart', () => backend.start())
+  ipcMain.handle('files:save-text', (event, suggestedName: unknown, content: unknown) =>
+    saveText(BrowserWindow.fromWebContents(event.sender), suggestedName, content)
+  )
 
   backend.onStatus((status) => {
     console.log(`[minutemind] backend ${JSON.stringify(status)}`)
@@ -73,6 +77,30 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
+
+/** Show a save dialog for a Markdown file and write it. Returns the path, or null. */
+async function saveText(
+  win: BrowserWindow | null,
+  suggestedName: unknown,
+  content: unknown
+): Promise<string | null> {
+  if (typeof suggestedName !== 'string' || typeof content !== 'string') return null
+  // Only a file name is accepted from the page, never a folder.
+  const name =
+    basename(suggestedName)
+      .replace(/[^\w .,()'&-]/g, '')
+      .trim() || 'minutes.md'
+  const options = {
+    defaultPath: join(app.getPath('documents'), name),
+    filters: [{ name: 'Markdown', extensions: ['md'] }]
+  }
+  const result = win
+    ? await dialog.showSaveDialog(win, options)
+    : await dialog.showSaveDialog(options)
+  if (result.canceled || !result.filePath) return null
+  await writeFile(result.filePath, content, 'utf8')
+  return result.filePath
+}
 
 let quitting = false
 app.on('before-quit', (event) => {

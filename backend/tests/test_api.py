@@ -21,6 +21,7 @@ from conftest import (
     FakeDetector,
     FakeEngine,
     FakeHardwareCache,
+    FakeLanguageModel,
     FakeLiveEngine,
     FakeRecorder,
     fake_devices,
@@ -45,8 +46,17 @@ def detector() -> FakeDetector:
 
 
 @pytest.fixture
+def llm() -> FakeLanguageModel:
+    return FakeLanguageModel()
+
+
+@pytest.fixture
 def client(
-    db: store.Store, engine: FakeEngine, live_engine: FakeLiveEngine, detector: FakeDetector
+    db: store.Store,
+    engine: FakeEngine,
+    live_engine: FakeLiveEngine,
+    detector: FakeDetector,
+    llm: FakeLanguageModel,
 ) -> Iterator[TestClient]:
     session = RecordingSession(db, recorder_factory=FakeRecorder, device_lister=fake_devices)
     app = create_app(
@@ -58,6 +68,7 @@ def client(
         live_engine=live_engine,
         live_chunk_s=1.0,
         detector=detector,
+        language_model=llm,
     )
     with TestClient(app) as c:
         yield c
@@ -222,6 +233,7 @@ def test_auto_transcribe_can_be_turned_off(client: TestClient) -> None:
         "auto_transcribe": False,
         "live_transcript": True,
         "speaker_labels": True,
+        "auto_minutes": True,
     }
     meeting_id = _record(client)
     assert client.app.state.transcriber.wait_idle()
@@ -249,6 +261,7 @@ def test_settings_validation(client: TestClient) -> None:
         "auto_transcribe": True,
         "live_transcript": True,
         "speaker_labels": True,
+        "auto_minutes": True,
     }
     assert client.patch("/settings", json={"processing": "gpu"}, headers=AUTH).json()[
         "processing"
@@ -423,3 +436,73 @@ def test_speaker_labels_can_be_turned_off(client: TestClient, detector: FakeDete
     assert data["speakers_status"] == "none"
     assert data["speakers"] == []
     assert detector.calls == []
+
+
+# -- minutes ---------------------------------------------------------------------
+
+
+def test_minutes_are_written_after_transcribing(client: TestClient, llm: FakeLanguageModel) -> None:
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    data = client.get(f"/meetings/{meeting_id}/minutes", headers=AUTH).json()
+    assert data["status"] == "done"
+    assert data["error"] is None
+    assert data["model"] == "fake-llm"
+    assert data["device"] == "GPU"
+    assert data["minutes"]["decisions"] == ["The launch moves to March."]
+    assert data["minutes"]["action_items"] == [
+        {"task": "Send the hosting quote", "owner": "Others", "due": "Friday"}
+    ]
+    assert data["minutes"]["topics"] == [{"title": "Launch date", "start_ms": 0}]
+    # The transcript and the speaker's name reached the model.
+    assert YOU_SAID in llm.prompts[0] and "Speaker 1:" in llm.prompts[0]
+
+    md = client.get(f"/meetings/{meeting_id}/minutes.md", headers=AUTH)
+    assert md.status_code == 200
+    assert md.headers["content-type"].startswith("text/markdown")
+    assert "## Decisions\n\n- The launch moves to March." in md.text
+    assert "- [ ] Send the hosting quote (**Others**, due Friday)" in md.text
+
+
+def test_minutes_can_be_turned_off_and_written_by_hand(
+    client: TestClient, llm: FakeLanguageModel
+) -> None:
+    client.patch("/settings", json={"auto_minutes": False}, headers=AUTH)
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    data = client.get(f"/meetings/{meeting_id}/minutes", headers=AUTH).json()
+    assert data["status"] == "none" and data["minutes"] is None
+    assert llm.prompts == []
+    assert client.get(f"/meetings/{meeting_id}/minutes.md", headers=AUTH).status_code == 404
+
+    res = client.post(f"/meetings/{meeting_id}/minutes", headers=AUTH)
+    assert res.status_code == 202
+    assert client.app.state.transcriber.wait_idle()
+    data = client.get(f"/meetings/{meeting_id}/minutes", headers=AUTH).json()
+    assert data["status"] == "done"
+    assert data["minutes"]["summary"].startswith("The team agreed")
+
+
+def test_minutes_rejects_bad_requests(client: TestClient) -> None:
+    assert client.post("/meetings/999/minutes", headers=AUTH).status_code == 404
+    assert client.get("/meetings/999/minutes", headers=AUTH).status_code == 404
+    client.patch("/settings", json={"auto_transcribe": False}, headers=AUTH)
+    meeting_id = _record(client)
+    res = client.post(f"/meetings/{meeting_id}/minutes", headers=AUTH)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "Transcribe the meeting first"
+
+
+def test_minutes_failure_keeps_the_transcript(client: TestClient, llm: FakeLanguageModel) -> None:
+    llm.error = ValueError("model exploded")
+    meeting_id = _record(client)
+    assert client.app.state.transcriber.wait_idle()
+    assert client.get(f"/meetings/{meeting_id}/transcript", headers=AUTH).json()["status"] == "done"
+    data = client.get(f"/meetings/{meeting_id}/minutes", headers=AUTH).json()
+    assert data["status"] == "failed"
+    assert "model exploded" in data["error"]
+
+
+def test_hardware_endpoint_reports_the_language_model(client: TestClient) -> None:
+    data = client.get("/system/hardware", headers=AUTH).json()
+    assert data["llm"] == {"name": "fake-llm", "local": True, "downloaded": True}

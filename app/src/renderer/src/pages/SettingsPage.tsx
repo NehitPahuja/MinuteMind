@@ -161,6 +161,30 @@ export function SettingsPage(): React.JSX.Element {
           </div>
         </Row>
 
+        <Row title="Minutes">
+          <div className="space-y-3">
+            <label className="flex cursor-pointer items-center gap-3 text-sm text-paper-100">
+              <input
+                type="checkbox"
+                checked={settings?.auto_minutes ?? true}
+                disabled={!settings}
+                onChange={(e) => change({ auto_minutes: e.target.checked })}
+                className="h-4 w-4 accent-paper-100"
+              />
+              Write minutes automatically once the transcript is ready
+            </label>
+            <p className="text-xs leading-relaxed text-paper-500">
+              Language model: {hardware?.llm.name ?? 'qwen2.5-3b-instruct'}, running on this PC
+              {hardware
+                ? hardware.llm.downloaded
+                  ? ', downloaded.'
+                  : ', downloads once (about 2 GB) the first time minutes are written.'
+                : '.'}{' '}
+              It takes turns with the speech model, so only one uses the GPU at a time.
+            </p>
+          </div>
+        </Row>
+
         {LATER.map((s) => (
           <Row key={s.title} title={s.title} aside={<PhaseTag phase={s.phase} />}>
             <p className="text-sm text-paper-500">{s.body}</p>

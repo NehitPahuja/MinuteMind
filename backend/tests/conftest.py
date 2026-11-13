@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -199,3 +200,59 @@ class FakeRecorder:
 
     def errors(self) -> list[str]:
         return list(self.warnings)
+
+
+class FakeLanguageModel:
+    """Stands in for LlamaCppModel: no model, answers from a script.
+
+    `answers` is a list of JSON strings returned in order (the last one repeats);
+    by default every request gets FAKE_MINUTES. `log` (a list) receives an
+    ("llm", device) entry per request, so tests can check the order of events.
+    """
+
+    name = "fake-llm"
+    local = True
+
+    def __init__(
+        self,
+        answers: list[str] | None = None,
+        context_tokens: int = 8192,
+        fail_on_gpu: bool = False,
+        error: Exception | None = None,
+        log: list | None = None,
+    ):
+        self.answers = answers or [json.dumps(FAKE_MINUTES)]
+        self.context_tokens = context_tokens
+        self.fail_on_gpu = fail_on_gpu
+        self.error = error
+        self.log = log if log is not None else []
+        self.prompts: list[str] = []
+        self.devices: list[str] = []
+        self.downloads = 0
+        self.releases = 0
+
+    def ensure_model(self, on_progress) -> None:
+        self.downloads += 1
+        on_progress(1.0)
+
+    def complete_json(self, system, user, schema, profile, max_tokens) -> str:
+        self.prompts.append(user)
+        self.devices.append(profile.device)
+        self.log.append(("llm", profile.device))
+        if self.error is not None:
+            raise self.error
+        if self.fail_on_gpu and profile.device == "cuda":
+            raise RuntimeError("CUDA error: out of memory")
+        index = min(len(self.prompts) - 1, len(self.answers) - 1)
+        return self.answers[index]
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+FAKE_MINUTES = {
+    "summary": "The team agreed to move the launch and reviewed the hosting quote.",
+    "decisions": ["The launch moves to March."],
+    "action_items": [{"task": "Send the hosting quote", "owner": "Others", "due": "Friday"}],
+    "topics": [{"title": "Launch date", "at": "00:00"}],
+}
