@@ -167,6 +167,70 @@ def download_llm(spec: LlmSpec, on_progress: ProgressCallback | None = None) -> 
     return target
 
 
+@dataclass(frozen=True)
+class EmbedderSpec:
+    """An ONNX sentence-embedding model on Hugging Face."""
+
+    name: str  # also the folder under models/embeddings/
+    repo: str
+    onnx_file: str  # path in the repo; saved locally as model.onnx
+    dims: int
+    # Prefix bge models expect in front of a search query (not passages).
+    query_prefix: str
+
+
+# bge-small-en-v1.5, int8-quantized ONNX export (34 MB instead of 133 MB, with
+# nearly the same quality). Runs on the processor with onnxruntime, which
+# faster-whisper already brings in, so search needs no PyTorch.
+EMBEDDER = EmbedderSpec(
+    name="bge-small-en-v1.5",
+    repo="Xenova/bge-small-en-v1.5",
+    onnx_file="onnx/model_quantized.onnx",
+    dims=384,
+    query_prefix="Represent this sentence for searching relevant passages: ",
+)
+
+EMBEDDINGS_DIR = "embeddings"
+
+
+def embedder_dir(spec: EmbedderSpec = EMBEDDER) -> Path:
+    return models_dir() / EMBEDDINGS_DIR / spec.name
+
+
+def is_embedder_downloaded(spec: EmbedderSpec = EMBEDDER) -> bool:
+    folder = embedder_dir(spec)
+    return (folder / "model.onnx").exists() and (folder / "tokenizer.json").exists()
+
+
+def download_embedder(
+    spec: EmbedderSpec = EMBEDDER, on_progress: ProgressCallback | None = None
+) -> Path:
+    """Download the embedding model if needed and return its folder."""
+    target = embedder_dir(spec)
+    if is_embedder_downloaded(spec):
+        return target
+
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    from huggingface_hub import HfApi, hf_hub_download
+
+    files = [spec.onnx_file, "tokenizer.json"]
+    staging = models_dir() / f".{spec.name}.downloading"
+    total = _expected_bytes(HfApi(), spec.repo, files)
+
+    def fetch() -> None:
+        for filename in files:
+            hf_hub_download(spec.repo, filename, local_dir=staging)
+
+    _fetch_with_retries(spec.name, fetch, staging, total, on_progress)
+    target.mkdir(parents=True, exist_ok=True)
+    (staging / spec.onnx_file).replace(target / "model.onnx")
+    (staging / "tokenizer.json").replace(target / "tokenizer.json")
+    shutil.rmtree(staging, ignore_errors=True)
+    if on_progress:
+        on_progress(1.0)
+    return target
+
+
 def _fetch_with_retries(
     name: str,
     fetch: Callable[[], object],
@@ -286,9 +350,13 @@ class ModelManager:
             )
             return self._model
 
-    def unload(self) -> None:
+    def unload(self, kind: str | None = None) -> None:
+        """Unload the loaded model. With `kind` ("whisper" or "llama"), only
+        if it is that kind, so one user can't unload another's model."""
         with self._lock:
             if self._model is None:
+                return
+            if kind is not None and self._key is not None and self._key[0] != kind:
                 return
             log.info("Unloading %s", self._key)
             close = getattr(self._model, "close", None)

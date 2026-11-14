@@ -14,16 +14,27 @@ const today = new Intl.DateTimeFormat('en-GB', {
   year: 'numeric'
 }).format(new Date())
 
+/** A request to open a meeting at a moment (from an Ask citation). */
+export interface Jump {
+  meetingId: number
+  /** Where to start playing, or null to just open it (a minutes source). */
+  ms: number | null
+  /** Changes on every request, so asking for the same moment twice works. */
+  nonce: number
+}
+
 interface MeetingsPageProps {
   selectedId: number | null
   onSelect: (id: number | null) => void
   onRecord: () => void
+  jump?: Jump | null
 }
 
 export function MeetingsPage({
   selectedId,
   onSelect,
-  onRecord
+  onRecord,
+  jump = null
 }: MeetingsPageProps): React.JSX.Element {
   const { client } = useBackend()
   const recording = useRecording()
@@ -93,6 +104,7 @@ export function MeetingsPage({
               onChanged={update}
               onDeleted={() => remove(m.id)}
               onRefresh={() => setRefreshKey((k) => k + 1)}
+              jump={jump?.meetingId === m.id ? jump : null}
             />
           ))}
         </ol>
@@ -171,6 +183,7 @@ interface MeetingRowProps {
   onChanged: (meeting: Meeting) => void
   onDeleted: () => void
   onRefresh: () => void
+  jump: Jump | null
 }
 
 function MeetingRow({
@@ -180,7 +193,8 @@ function MeetingRow({
   onToggle,
   onChanged,
   onDeleted,
-  onRefresh
+  onRefresh,
+  jump
 }: MeetingRowProps): React.JSX.Element {
   const when = formatWhen(meeting.created_at)
   const jobs = useTranscriptionJobs()
@@ -219,6 +233,7 @@ function MeetingRow({
           onChanged={onChanged}
           onDeleted={onDeleted}
           onRefresh={onRefresh}
+          jump={jump}
         />
       )}
       {open && live && (
@@ -241,15 +256,18 @@ interface MeetingDetailProps {
   onChanged: (meeting: Meeting) => void
   onDeleted: () => void
   onRefresh: () => void
+  jump: Jump | null
 }
 
 function MeetingDetail({
   meeting,
   onChanged,
   onDeleted,
-  onRefresh
+  onRefresh,
+  jump
 }: MeetingDetailProps): React.JSX.Element {
   const player = useRef<PlayerHandle>(null)
+  const container = useRef<HTMLDivElement>(null)
   const [positionMs, setPositionMs] = useState(0)
   const { client } = useBackend()
   const [track, setTrack] = useState<AudioTrack>('mix')
@@ -285,8 +303,26 @@ function MeetingDetail({
     }
   }
 
+  // Opened from an Ask citation: play from that moment and bring the
+  // transcript (where the playing line is highlighted) into view. Without a
+  // moment, show the meeting from the top, where the minutes are.
+  useEffect(() => {
+    if (!jump) return
+    if (jump.ms === null) {
+      container.current?.parentElement?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      return
+    }
+    player.current?.playFrom(jump.ms)
+    // The minutes and transcript load after the meeting opens, so wait for layout.
+    const timer = setTimeout(() => {
+      const transcript = container.current?.querySelector('section[aria-label="Transcript"]')
+      transcript?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }, 600)
+    return () => clearTimeout(timer)
+  }, [jump])
+
   return (
-    <div className="space-y-4 px-3 pb-6 pl-[134px]">
+    <div ref={container} className="space-y-4 px-3 pb-6 pl-[134px]">
       {editing ? (
         <input
           autoFocus

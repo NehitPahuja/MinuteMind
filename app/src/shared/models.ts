@@ -23,7 +23,40 @@ export interface Meeting {
   speakers_error: string | null
   minutes_status: MinutesStatus
   minutes_error: string | null
+  index_status: 'none' | 'done' | 'failed'
 }
+
+/** A passage Ask found, numbered as the answer cites it ([1], [2]...). */
+export interface AskSource {
+  n: number
+  chunk_id: number
+  meeting_id: number
+  meeting_title: string
+  meeting_created_at: string
+  kind: 'transcript' | 'minutes'
+  start_ms: number
+  end_ms: number
+  /** Where a citation opens the meeting: the best-matching line. Null for
+   * a minutes passage with no matching line. */
+  at_ms: number | null
+  text: string
+  /** The cited line ("Name: text"), once the answer is done. */
+  quote: string | null
+}
+
+/** One line of the /ask stream (newline-delimited JSON). */
+export type AskEvent =
+  | { type: 'sources'; sources: AskSource[] }
+  | { type: 'status'; state: 'queued' | 'waiting' | 'loading' | 'answering' }
+  | { type: 'token'; text: string }
+  | {
+      type: 'done'
+      answer: string
+      not_found: boolean
+      cited: number[]
+      sources: AskSource[]
+    }
+  | { type: 'error'; message: string }
 
 export type MinutesStatus = 'none' | 'queued' | 'running' | 'done' | 'failed'
 

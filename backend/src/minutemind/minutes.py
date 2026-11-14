@@ -148,7 +148,7 @@ def build_context(db: store.Store, meeting_id: int) -> MeetingContext:
         raise ValueError(f"Meeting {meeting_id} doesn't exist")
     names = {s["label"]: s["display_name"] for s in db.list_speakers(meeting_id)}
     lines = [
-        Line(s.start_ms, s.end_ms, _speaker_name(s, names), s.text.strip())
+        Line(s.start_ms, s.end_ms, speaker_name(s, names), s.text.strip())
         for s in db.get_segments(meeting_id)
         if s.text.strip()
     ]
@@ -166,7 +166,7 @@ def build_context(db: store.Store, meeting_id: int) -> MeetingContext:
     )
 
 
-def _speaker_name(segment: store.Segment, names: dict[str, str]) -> str:
+def speaker_name(segment: store.Segment, names: dict[str, str]) -> str:
     if segment.source == "mic":
         return YOU
     if segment.speaker:
@@ -275,7 +275,7 @@ class MinutesWriter:
         people = ", ".join(ctx.people) or YOU
         return (
             f"Meeting: {ctx.title}\n"
-            f"Date: {_pretty_date(ctx.created_at)}\n"
+            f"Date: {pretty_date(ctx.created_at)}\n"
             f"Length: {clock(ctx.duration_ms)}\n"
             f"People speaking: {people}\n"
         )
@@ -430,7 +430,7 @@ def _unique(items) -> list[str]:
     return out
 
 
-def _pretty_date(iso: str) -> str:
+def pretty_date(iso: str) -> str:
     try:
         return datetime.fromisoformat(iso).astimezone().strftime("%d %B %Y, %H:%M")
     except ValueError:
@@ -440,7 +440,7 @@ def _pretty_date(iso: str) -> str:
 def to_markdown(meeting: store.Meeting, minutes: dict) -> str:
     """The minutes as a Markdown document, for export."""
     out = [f"# {meeting.title}", ""]
-    out.append(f"{_pretty_date(meeting.created_at)} · {clock(meeting.duration_ms)}")
+    out.append(f"{pretty_date(meeting.created_at)} · {clock(meeting.duration_ms)}")
     out += ["", "## Summary", "", minutes.get("summary") or "_No summary._", ""]
 
     out += ["## Decisions", ""]

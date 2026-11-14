@@ -7,6 +7,7 @@ with Whisper: loading it unloads the speech model first, and vice versa.
 from __future__ import annotations
 
 import logging
+from typing import Iterator
 
 from minutemind import hardware, models
 from minutemind.llm.base import ProgressCallback
@@ -64,5 +65,30 @@ class LlamaCppModel:
             log.warning("The model ran out of room before finishing its answer")
         return choice["message"]["content"] or ""
 
+    def stream_chat(
+        self,
+        system: str,
+        user: str,
+        profile: hardware.Profile,
+        max_tokens: int,
+    ) -> Iterator[str]:
+        llama = self.manager.llama(self.spec, gpu_layers_for(profile))
+        stream = llama.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            stream=True,
+            # Answers should repeat the sources, not get creative.
+            temperature=0.1,
+            top_p=0.9,
+            repeat_penalty=1.05,
+            max_tokens=max_tokens,
+        )
+        for part in stream:
+            text = part["choices"][0]["delta"].get("content")
+            if text:
+                yield text
+
     def release(self) -> None:
-        self.manager.unload()
+        self.manager.unload("llama")

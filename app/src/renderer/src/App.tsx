@@ -6,10 +6,12 @@ import { AskPage } from './pages/AskPage'
 import { MeetingsPage } from './pages/MeetingsPage'
 import { RecordPage } from './pages/RecordPage'
 import { SettingsPage } from './pages/SettingsPage'
+import type { Jump } from './pages/MeetingsPage'
 
 function Shell(): React.JSX.Element {
   const [page, setPage] = useState<Page>('meetings')
   const [selectedMeeting, setSelectedMeeting] = useState<number | null>(null)
+  const [jump, setJump] = useState<Jump | null>(null)
 
   return (
     <div className="flex h-screen text-paper-100">
@@ -20,6 +22,7 @@ function Shell(): React.JSX.Element {
             <MeetingsPage
               selectedId={selectedMeeting}
               onSelect={setSelectedMeeting}
+              jump={jump}
               onRecord={() => setPage('record')}
             />
           )}
@@ -31,7 +34,15 @@ function Shell(): React.JSX.Element {
               }}
             />
           )}
-          {page === 'ask' && <AskPage />}
+          {page === 'ask' && (
+            <AskPage
+              onOpen={(meetingId, ms) => {
+                setSelectedMeeting(meetingId)
+                setJump((j) => ({ meetingId, ms, nonce: (j?.nonce ?? 0) + 1 }))
+                setPage('meetings')
+              }}
+            />
+          )}
           {page === 'settings' && <SettingsPage />}
         </div>
       </main>

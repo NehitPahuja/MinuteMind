@@ -15,6 +15,9 @@ import { join } from 'path'
  *
  * With MINUTEMIND_SCREENSHOT_TRANSCRIPT=<seconds> it opens the newest meeting,
  * waits up to that long for its transcript, and clicks the second line.
+ *
+ * With MINUTEMIND_SCREENSHOT_ASK="question|question" it asks each question on
+ * the Ask page, then clicks the last answer's first citation.
  */
 const PAGES = [
   { file: 'meetings.png', button: 'Meetings' },
@@ -100,6 +103,47 @@ export async function captureScreenshotsIfRequested(
     await sleep(800)
     console.log(`[minutemind] speaker rename: ${renamed}`)
     await shoot('transcript-renamed.png')
+  }
+
+  // Ask each question (separated by "|"), wait for the answer, then click the
+  // first citation of the last answer and check the player jumped there.
+  const questions = (process.env['MINUTEMIND_SCREENSHOT_ASK'] ?? '')
+    .split('|')
+    .map((q) => q.trim())
+    .filter(Boolean)
+  for (const [i, question] of questions.entries()) {
+    await clickSidebar(win, 'Ask')
+    await sleep(500)
+    await run(
+      win,
+      `(() => { const input = document.querySelector('input[aria-label="Question"]');
+        const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        set.call(input, ${JSON.stringify(question)}); input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.form.requestSubmit(); })()`
+    )
+    const deadline = Date.now() + 120_000
+    while (Date.now() < deadline) {
+      const asking = await run(
+        win,
+        `[...document.querySelectorAll('form button')].some((b) => b.textContent.trim() === 'Stop')`
+      )
+      if (!asking) break
+      await sleep(500)
+    }
+    const answer = await run(win, `document.querySelector('main ol > li [aria-live]')?.innerText`)
+    console.log(`[minutemind] ask: ${question} -> ${JSON.stringify(answer)}`)
+    await shoot(`ask-${i + 1}.png`)
+  }
+  if (questions.length > 0) {
+    const cited = await run(
+      win,
+      `(() => { const b = document.querySelector('main ol > li [aria-live] button');
+        if (!b) return null; const label = b.textContent; b.click(); return label; })()`
+    )
+    await sleep(2000)
+    const position = await run(win, `document.querySelector('audio')?.currentTime.toFixed(2)`)
+    console.log(`[minutemind] clicked citation ${JSON.stringify(cited)}, player at ${position}s`)
+    await shoot('ask-citation.png')
   }
 
   const recordSeconds = Number(process.env['MINUTEMIND_SCREENSHOT_RECORD'] ?? 0)

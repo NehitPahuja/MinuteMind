@@ -19,6 +19,7 @@ from conftest import (
     YOU_SAID,
     LIVE_YOU,
     FakeDetector,
+    FakeEmbedder,
     FakeEngine,
     FakeHardwareCache,
     FakeLanguageModel,
@@ -69,6 +70,7 @@ def client(
         live_chunk_s=1.0,
         detector=detector,
         language_model=llm,
+        embedder=FakeEmbedder(),
     )
     with TestClient(app) as c:
         yield c

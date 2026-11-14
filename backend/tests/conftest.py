@@ -220,8 +220,11 @@ class FakeLanguageModel:
         fail_on_gpu: bool = False,
         error: Exception | None = None,
         log: list | None = None,
+        chat_answers: list[str] | None = None,
     ):
         self.answers = answers or [json.dumps(FAKE_MINUTES)]
+        self.chat_answers = chat_answers or ["Not found in the recordings."]
+        self.chat_prompts: list[str] = []
         self.context_tokens = context_tokens
         self.fail_on_gpu = fail_on_gpu
         self.error = error
@@ -246,8 +249,51 @@ class FakeLanguageModel:
         index = min(len(self.prompts) - 1, len(self.answers) - 1)
         return self.answers[index]
 
+    def stream_chat(self, system, user, profile, max_tokens):
+        """Yields the next scripted chat answer (`chat_answers`) word by word."""
+        self.chat_prompts.append(user)
+        self.devices.append(profile.device)
+        self.log.append(("chat", profile.device))
+        if self.error is not None:
+            raise self.error
+        if self.fail_on_gpu and profile.device == "cuda":
+            raise RuntimeError("CUDA error: out of memory")
+        index = min(len(self.chat_prompts) - 1, len(self.chat_answers) - 1)
+        for word in self.chat_answers[index].split(" "):
+            yield word + " "
+
     def release(self) -> None:
         self.releases += 1
+
+
+class FakeEmbedder:
+    """Stands in for bge-small: a bag of hashed words, so passages sharing
+    words with a question are similar and unrelated ones are not."""
+
+    name = "fake-embedder"
+    dims = 256
+
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.calls = 0
+
+    def ensure(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+    def embed(self, texts, query=False):
+        import re
+        import zlib
+
+        self.ensure()
+        self.calls += 1
+        out = np.zeros((len(texts), self.dims), dtype=np.float32)
+        for row, text in enumerate(texts):
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                if len(word) > 3 or word.isdigit():
+                    out[row, zlib.crc32(word.encode()) % self.dims] += 1.0
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.maximum(norms, 1e-12)
 
 
 FAKE_MINUTES = {

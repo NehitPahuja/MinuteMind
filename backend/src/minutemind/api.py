@@ -9,11 +9,13 @@ set headers, pass it as a `token` query parameter instead.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import threading
-from contextlib import asynccontextmanager
-from typing import Literal
+import time
+from contextlib import asynccontextmanager, contextmanager
+from typing import Iterator, Literal
 
 from fastapi import (
     Depends,
@@ -25,11 +27,22 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from minutemind import __version__, audio_files, diarize, hardware, minutes, models, paths, store
+from minutemind import (
+    __version__,
+    audio_files,
+    diarize,
+    hardware,
+    index,
+    minutes,
+    models,
+    paths,
+    qa,
+    store,
+)
 from minutemind.llm.base import LanguageModel
 from minutemind.capture import list_devices
 from minutemind.session import RecordingError, RecordingSession
@@ -86,6 +99,16 @@ class NoteUpdate(BaseModel):
     ts_ms: int | None = Field(default=None, ge=0)
 
 
+class AskQuestion(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    # Limit the search to one meeting; omit to search them all.
+    meeting_id: int | None = None
+
+
+# Passed as `embedder` to use the real bge-small model.
+DEFAULT_EMBEDDER = "default"
+
+
 class HardwareCache:
     """Hardware detection is slow (nvidia-smi, loading CUDA), so do it once."""
 
@@ -110,6 +133,7 @@ def create_app(
     live_chunk_s: float | None = None,
     detector: diarize.Detector | None = None,
     language_model: LanguageModel | None = None,
+    embedder: index.Embedder | Literal["default"] | None = DEFAULT_EMBEDDER,
 ) -> FastAPI:
     if not token:
         raise ValueError("A non-empty session token is required")
@@ -151,11 +175,32 @@ def create_app(
         )
         app.state.profile = current_profile
 
+        app.state.indexer = index.Indexer(
+            app.state.db, index.OnnxEmbedder() if embedder == DEFAULT_EMBEDDER else embedder
+        )
+        app.state.transcriber.on_job_done = app.state.indexer.enqueue
+
+        @contextmanager
+        def hold_gpu() -> Iterator[None]:
+            """For answering: keep new jobs back and wait out a running one."""
+            transcriber = app.state.transcriber
+            transcriber.pause("ask")
+            try:
+                while transcriber.busy():
+                    time.sleep(0.2)
+                yield
+            finally:
+                transcriber.resume("ask")
+
+        app.state.asker = qa.Asker(
+            app.state.db, app.state.indexer, llm, current_profile, hold_gpu=hold_gpu
+        )
+
         live_kwargs = {"chunk_s": live_chunk_s} if live_chunk_s else {}
         app.state.live = LiveTranscriber(
             live_engine or LiveWhisper(manager),
             current_profile,
-            gpu_free=lambda: not app.state.transcriber.busy(),
+            gpu_free=lambda: not app.state.transcriber.busy() and not app.state.asker.busy(),
             **live_kwargs,
         )
 
@@ -174,9 +219,11 @@ def create_app(
         if recovered:
             log.warning("Recovered interrupted recordings: %s", recovered)
         app.state.transcriber.start()
+        app.state.indexer.start()
         yield
         app.state.session.shutdown()
         app.state.transcriber.stop()
+        app.state.indexer.stop()
 
     app = FastAPI(
         title="MinuteMind",
@@ -315,6 +362,7 @@ def create_app(
         get_meeting_or_404(meeting_id)
         if not get_db().rename_speaker(meeting_id, label, body.display_name.strip()):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Speaker not found")
+        app.state.indexer.enqueue(meeting_id)  # passages carry speaker names
         return get_db().list_speakers(meeting_id)
 
     @app.post("/meetings/{meeting_id}/speakers/detect", status_code=status.HTTP_202_ACCEPTED)
@@ -380,7 +428,9 @@ def create_app(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 "ts_ms is required when the meeting isn't being recorded",
             )
-        return get_db().add_note(meeting_id, ts_ms, body.text.strip()).to_dict()
+        note = get_db().add_note(meeting_id, ts_ms, body.text.strip())
+        app.state.indexer.enqueue(meeting_id)  # skipped until there's a transcript
+        return note.to_dict()
 
     @app.patch("/notes/{note_id}")
     def update_note(note_id: int, body: NoteUpdate) -> dict:
@@ -389,12 +439,43 @@ def create_app(
         text = body.text.strip() if body.text is not None else None
         note = get_db().update_note(note_id, text=text, ts_ms=body.ts_ms)
         assert note is not None
+        app.state.indexer.enqueue(note.meeting_id)
         return note.to_dict()
 
     @app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
     def delete_note(note_id: int) -> None:
-        if not get_db().delete_note(note_id):
+        note = get_db().get_note(note_id)
+        if note is None or not get_db().delete_note(note_id):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Note not found")
+        app.state.indexer.enqueue(note.meeting_id)
+
+    # -- search and ask --------------------------------------------------------
+
+    @app.get("/search")
+    def search(q: str, meeting_id: int | None = None) -> dict:
+        """The passages Ask would use for a question, best first, without the model."""
+        if meeting_id is not None:
+            get_meeting_or_404(meeting_id)
+        sources = qa.retrieve(get_db(), app.state.indexer, q, meeting_id)
+        return {"results": [s.to_dict() for s in sources]}
+
+    @app.get("/search/status")
+    def search_status() -> dict:
+        return app.state.indexer.status()
+
+    @app.post("/ask")
+    def ask(body: AskQuestion) -> StreamingResponse:
+        """Stream an answer as newline-delimited JSON events (see qa.Asker.ask)."""
+        if body.meeting_id is not None:
+            get_meeting_or_404(body.meeting_id)
+        if get_session().status()["state"] != "idle":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Ask is available once the recording stops, while the live transcript uses the GPU",
+            )
+        events = app.state.asker.ask(body.question.strip(), body.meeting_id)
+        lines = (json.dumps(event) + "\n" for event in events)
+        return StreamingResponse(lines, media_type="application/x-ndjson")
 
     # -- system and settings -------------------------------------------------
 

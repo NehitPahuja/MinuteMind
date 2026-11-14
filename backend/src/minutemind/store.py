@@ -138,7 +138,45 @@ MIGRATIONS: list[str] = [
         created_at TEXT NOT NULL
     );
     """,
+    # 6: search index. Each meeting's transcript (with notes) is cut into
+    # overlapping passages, plus one passage for its minutes. chunks_fts is a
+    # keyword index over the passages, kept in step by the triggers.
+    """
+    ALTER TABLE meetings ADD COLUMN index_status TEXT NOT NULL DEFAULT 'none';
+    ALTER TABLE meetings ADD COLUMN index_version TEXT;  -- embedding model, or 'keywords'
+
+    CREATE TABLE chunks (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        kind       TEXT    NOT NULL,  -- 'transcript' or 'minutes'
+        start_ms   INTEGER NOT NULL,
+        end_ms     INTEGER NOT NULL,
+        text       TEXT    NOT NULL,
+        embedding  BLOB              -- float32 vector, NULL without the embedding model
+    );
+    CREATE INDEX chunks_by_meeting ON chunks (meeting_id, start_ms);
+
+    CREATE VIRTUAL TABLE chunks_fts USING fts5(
+        text, content='chunks', content_rowid='id', tokenize='porter unicode61'
+    );
+    CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+        INSERT INTO chunks_fts (rowid, text) VALUES (new.id, new.text);
+    END;
+    CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+        INSERT INTO chunks_fts (chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    END;
+    CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+        INSERT INTO chunks_fts (chunks_fts, rowid, text) VALUES ('delete', old.id, old.text);
+        INSERT INTO chunks_fts (rowid, text) VALUES (new.id, new.text);
+    END;
+    """,
 ]
+
+# Search index status values (per meeting).
+INDEX_NONE = "none"
+INDEX_DONE = "done"
+INDEX_FAILED = "failed"
+INDEX_KEYWORDS = "keywords"  # index_version when no embedding model was available
 
 
 @dataclass(frozen=True)
@@ -161,6 +199,7 @@ class Meeting:
     speakers_error: str | None = None
     minutes_status: str = MINUTES_NONE
     minutes_error: str | None = None
+    index_status: str = INDEX_NONE
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -470,6 +509,101 @@ class Store:
             ).fetchall()
         return [r["id"] for r in rows]
 
+    # -- search index -----------------------------------------------------
+
+    def replace_chunks(self, meeting_id: int, chunks: list[Chunk], version: str) -> None:
+        """Swap in a meeting's passages (with their keyword index) in one go."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chunks WHERE meeting_id = ?", (meeting_id,))
+            conn.executemany(
+                "INSERT INTO chunks (meeting_id, kind, start_ms, end_ms, text, embedding)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (meeting_id, c.kind, c.start_ms, c.end_ms, c.text, c.embedding)
+                    for c in chunks
+                ],
+            )
+            conn.execute(
+                "UPDATE meetings SET index_status = ?, index_version = ? WHERE id = ?",
+                (INDEX_DONE, version, meeting_id),
+            )
+
+    def set_index_status(self, meeting_id: int, status: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE meetings SET index_status = ? WHERE id = ?", (status, meeting_id))
+
+    def meetings_to_index(self, version: str) -> list[int]:
+        """Meetings with a transcript whose index is missing or was built
+        with a different embedding model (or none)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM meetings WHERE transcript_status = ?"
+                " AND (index_version IS NULL OR index_version != ?) ORDER BY id",
+                (TRANSCRIPT_DONE, version),
+            ).fetchall()
+        return [r["id"] for r in rows]
+
+    def keyword_search(
+        self, match: str, meeting_id: int | None = None, limit: int = 20
+    ) -> list[int]:
+        """Chunk ids matching an FTS5 query, best first (BM25)."""
+        sql = (
+            "SELECT c.id FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
+            " WHERE chunks_fts MATCH ?"
+        )
+        args: list[object] = [match]
+        if meeting_id is not None:
+            sql += " AND c.meeting_id = ?"
+            args.append(meeting_id)
+        sql += " ORDER BY bm25(chunks_fts) LIMIT ?"
+        args.append(limit)
+        with self._connect() as conn:
+            return [r["id"] for r in conn.execute(sql, args).fetchall()]
+
+    def chunk_embeddings(self, meeting_id: int | None = None) -> tuple[list[int], list[bytes]]:
+        """Ids and raw vectors of every chunk that has one (in scope)."""
+        sql = "SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL"
+        args: tuple = ()
+        if meeting_id is not None:
+            sql += " AND meeting_id = ?"
+            args = (meeting_id,)
+        with self._connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [r["id"] for r in rows], [r["embedding"] for r in rows]
+
+    def get_chunks(self, ids: list[int]) -> list[Chunk]:
+        """Chunks by id, in the order asked for, with their meeting's title."""
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT c.*, m.title, m.created_at FROM chunks c JOIN meetings m ON m.id = c.meeting_id"
+                f" WHERE c.id IN ({marks})",
+                ids,
+            ).fetchall()
+        by_id = {
+            r["id"]: Chunk(
+                kind=r["kind"],
+                start_ms=r["start_ms"],
+                end_ms=r["end_ms"],
+                text=r["text"],
+                id=r["id"],
+                meeting_id=r["meeting_id"],
+                meeting_title=r["title"],
+                meeting_created_at=r["created_at"],
+            )
+            for r in rows
+        }
+        return [by_id[i] for i in ids if i in by_id]
+
+    def count_chunks(self, meeting_id: int) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks WHERE meeting_id = ?", (meeting_id,)
+            ).fetchone()
+        return int(row["n"])
+
     # -- notes ------------------------------------------------------------
 
     def add_note(self, meeting_id: int, ts_ms: int, text: str) -> Note:
@@ -533,6 +667,21 @@ class Store:
 
 
 @dataclass(frozen=True)
+class Chunk:
+    """A passage of a meeting, as stored for search."""
+
+    kind: str  # "transcript" or "minutes"
+    start_ms: int
+    end_ms: int
+    text: str
+    embedding: bytes | None = None
+    id: int | None = None
+    meeting_id: int | None = None
+    meeting_title: str | None = None
+    meeting_created_at: str | None = None
+
+
+@dataclass(frozen=True)
 class Note:
     id: int
     meeting_id: int
@@ -576,4 +725,5 @@ def _row_to_meeting(row: sqlite3.Row) -> Meeting:
         speakers_error=row["speakers_error"],
         minutes_status=row["minutes_status"],
         minutes_error=row["minutes_error"],
+        index_status=row["index_status"],
     )

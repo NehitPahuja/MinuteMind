@@ -102,7 +102,7 @@ class LiveWhisper:
         return lines
 
     def release(self) -> None:
-        self.manager.unload()
+        self.manager.unload("whisper")
 
 
 class LiveBuffer:

@@ -100,7 +100,7 @@ class WhisperEngine:
         return out
 
     def release(self) -> None:
-        self.manager.unload()
+        self.manager.unload("whisper")
 
 
 def is_gpu_failure(exc: BaseException) -> bool:
@@ -126,6 +126,9 @@ class TranscriptionQueue:
         self.engine = engine
         self.detector = detector
         self.writer = writer
+        # Called with the meeting id after every job, done or failed, so the
+        # search index can catch up with the new transcript, speakers or minutes.
+        self.on_job_done: Callable[[int], None] | None = None
         self._minutes_enabled = minutes_enabled
         self._speakers_enabled = speakers_enabled
         self._profile = profile
@@ -141,6 +144,7 @@ class TranscriptionQueue:
         # already running finishes; new ones wait.
         self._allowed = threading.Event()
         self._allowed.set()
+        self._paused_for: set[str] = set()
         self._stopping = False
 
     # -- control -----------------------------------------------------------
@@ -154,11 +158,18 @@ class TranscriptionQueue:
         for meeting_id in self.db.pending_minutes():
             self.enqueue_minutes(meeting_id)
 
-    def pause(self) -> None:
-        self._allowed.clear()
+    def pause(self, reason: str = "recording") -> None:
+        """Hold back new jobs (a running one finishes) until every reason
+        given here is resumed. Recording and Ask each pause for their own."""
+        with self._lock:
+            self._paused_for.add(reason)
+            self._allowed.clear()
 
-    def resume(self) -> None:
-        self._allowed.set()
+    def resume(self, reason: str = "recording") -> None:
+        with self._lock:
+            self._paused_for.discard(reason)
+            if not self._paused_for:
+                self._allowed.set()
 
     def busy(self) -> bool:
         """True while a job is using the speech model."""
@@ -263,13 +274,21 @@ class TranscriptionQueue:
                     )
             finally:
                 with self._lock:
-                    self._current = None
                     idle = not self._queued
                 if idle:
-                    # Free GPU memory for other apps and the live transcript.
+                    # Free GPU memory for other apps, the live transcript and
+                    # Ask. This happens before the job counts as finished, so
+                    # nothing waiting for the GPU loads a model meanwhile.
                     self.engine.release()
                     if self.writer is not None:
                         self.writer.release()
+                with self._lock:
+                    self._current = None
+                if self.on_job_done is not None:
+                    try:
+                        self.on_job_done(meeting_id)
+                    except Exception:  # noqa: BLE001 - never stop the worker
+                        log.exception("on_job_done failed for meeting %s", meeting_id)
 
     def _update(self, stage: str, progress: float) -> None:
         with self._lock:

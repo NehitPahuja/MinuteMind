@@ -39,6 +39,46 @@ export class BackendClient {
     return res.text()
   }
 
+  /** POST and read a newline-delimited JSON stream, one callback per line. */
+  async stream<T>(
+    path: string,
+    body: unknown,
+    onEvent: (event: T) => void,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const res = await fetch(`${this.connection.baseUrl}${path}`, {
+      method: 'POST',
+      headers: { [TOKEN_HEADER]: this.connection.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal
+    })
+    if (!res.ok || !res.body) {
+      let message = `Request failed (${res.status})`
+      try {
+        const data = (await res.json()) as { detail?: unknown }
+        if (typeof data.detail === 'string') message = data.detail
+      } catch {
+        // Response had no JSON body.
+      }
+      throw new ApiError(res.status, message)
+    }
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+    let buffer = ''
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (value) buffer += value
+      let newline = buffer.indexOf('\n')
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim()
+        buffer = buffer.slice(newline + 1)
+        if (line) onEvent(JSON.parse(line) as T)
+        newline = buffer.indexOf('\n')
+      }
+      if (done) break
+    }
+    if (buffer.trim()) onEvent(JSON.parse(buffer) as T)
+  }
+
   /** URL an <audio> element can load directly (token in the query string). */
   audioUrl(meetingId: number, track: AudioTrack): string {
     return `${this.connection.baseUrl}/meetings/${meetingId}/audio/${track}?token=${this.connection.token}`

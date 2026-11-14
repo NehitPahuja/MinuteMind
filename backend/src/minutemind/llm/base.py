@@ -6,7 +6,7 @@ Claude behind the same interface.
 
 from __future__ import annotations
 
-from typing import Callable, Protocol
+from typing import Callable, Iterator, Protocol
 
 from minutemind import hardware
 
@@ -36,6 +36,16 @@ class LanguageModel(Protocol):
         max_tokens: int,
     ) -> str:
         """Return the model's answer, constrained to JSON matching `schema`."""
+        ...
+
+    def stream_chat(
+        self,
+        system: str,
+        user: str,
+        profile: hardware.Profile,
+        max_tokens: int,
+    ) -> Iterator[str]:
+        """Answer in free text, yielding pieces of it as they are written."""
         ...
 
     def release(self) -> None:
