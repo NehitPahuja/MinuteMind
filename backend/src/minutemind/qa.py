@@ -59,6 +59,7 @@ STOPWORDS = set(
 )
 
 CITATION = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+NOT_FOUND_PHRASE = re.compile(r"(?:sorry,?\s*)?not found in the recordings\.?", re.IGNORECASE)
 
 
 @dataclass
@@ -168,10 +169,12 @@ def build_prompt(question: str, sources: list[Source]) -> str:
 
 def check_answer(answer: str, count: int) -> tuple[str, list[int], bool]:
     """Keep only citations of real sources. Returns (answer, cited numbers,
-    not_found). An answer citing nothing is treated as not found."""
-    text = answer.strip()
-    if NOT_FOUND.lower().rstrip(".") in text.lower():
-        return NOT_FOUND, [], True
+    not_found). An answer citing nothing is treated as not found.
+
+    Small models sometimes answer with citations and then add "Not found in
+    the recordings." for a part they couldn't answer. That phrase is dropped,
+    and the cited answer is kept."""
+    text = NOT_FOUND_PHRASE.sub(" ", answer).strip()
     cited: list[int] = []
 
     def keep(match: re.Match) -> str:

@@ -213,6 +213,14 @@ def test_uncited_or_refused_answers_are_not_found(answer: str) -> None:
     assert qa.check_answer(answer, 3) == (qa.NOT_FOUND, [], True)
 
 
+def test_cited_answer_with_a_trailing_not_found_is_kept() -> None:
+    # Seen from the real 3B model on a broad question.
+    raw = '[2] The group discussed the challenge. [4] You said "see you then." Not found in the recordings.'
+    text, cited, missing = qa.check_answer(raw, 6)
+    assert not missing and cited == [2, 4]
+    assert text == '[2] The group discussed the challenge. [4] You said "see you then."'
+
+
 def test_prompt_numbers_sources_with_meeting_and_time(db: store.Store) -> None:
     indexer, _ = _indexed(db)
     sources = qa.retrieve(db, indexer, "Who will send the beta invite?")
