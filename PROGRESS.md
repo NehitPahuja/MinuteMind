@@ -11,7 +11,7 @@ Read this first in every new session, then [docs/PLAN.md](docs/PLAN.md). Update 
 | 2 | Transcription after the meeting | Done |
 | 3 | Live transcript and notes | Done |
 | 4 | Speaker labels | Done |
-| 5 | Local AI and meeting minutes | Built, waiting on the real-model check |
+| 5 | Local AI and meeting minutes | Done |
 | 6 | Search and Ask | Not started |
 | 7 | Claude option | Not started |
 | 8 | Polish and installer | Not started |
@@ -52,15 +52,22 @@ Checked with a 40-second test call: three Windows text-to-speech voices on the P
 
 - All five turns went to the right person (Speaker 1 = Zira twice, Speaker 2 = David twice, Speaker 3 = Hazel), and the mic lines stayed "You". Transcription and speaker detection took 17 s.
 - Renaming Speaker 1 to "Priya" in the UI updated the chip and every one of her lines.
-- Re-detecting with a count works: told 2 people it merges the two female voices, tol## Phase 5 status: built, real-model check still to do
+- Re-detecting with a count works: told 2 people it merges the two female voices, told 3 it matches the truth.
 
-Everything is built and covered by tests with a fake language model (111 backend tests pass; the app typechecks, lints and builds). What's left needs the real model:
+### Phase 5 results with the 3B model
 
-1. **Finish the downloads.** The connection was very slow (about 85 KB/s from Hugging Face). A resumable background download writes `%APPDATA%\MinuteMind\models\llm\qwen2.5-3b-instruct-q4_k_m.gguf.part` and renames it to `.gguf` once complete (2,104,932,768 bytes). If it stopped, resume with `curl -L -C - -o <that .part file> https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf`, then rename. The app would otherwise download it itself on the first minutes job.
-2. **llama-cpp-python is installed** in the venv (uv's own download kept stalling, so the wheel was fetched with a resuming curl and installed with `uv pip install <file>`). `pyproject.toml` and `uv.lock` include it (locking took 38 minutes on the slow connection; use `UV_HTTP_TIMEOUT=900` if it times out). Check with `.venv/Scripts/python.exe -c "from minutemind import gpu_env; gpu_env.prepare(); import llama_cpp; print(llama_cpp.llama_supports_gpu_offload())"`, which should print True.
-3. **Done when:** run the 40-second Phase 4 test meeting (or a new one with a clear decision and a task with an owner and a date) through the real app, check the minutes list the real decisions and action items, and watch `nvidia-smi` during the run to see Whisper's memory freed before the language model loads. Tune the prompt in `minutes.py` if the 3B model misses things.
+Checked with a new 55-second scripted meeting (David as "You" on the mic, Zira and Hazel on PC sound): two decisions (launch on December 1st; drop dark mode and move it to January), three action items (Hazel finishes the onboarding videos by Friday the 20th; Zira sends the beta invite to 50 testers by Wednesday; You book the launch review with marketing next Tuesday), and a typed note "Ads budget of $5,000 approved by finance". It went through real large-v3-turbo, real speaker detection and Qwen 2.5 3B on the RTX 3050. The whole job took about 40 s, and speakers were all right this time (S1 = Zira, S2 = Hazel).
 
- using the GPU at a time.
+- **GPU hand-off confirmed with the 3B model:** about 1.7 GB with Whisper, back to about 500 MB for speaker detection, about 2.9 GB peak with the language model on the GPU, and about 500 MB once done. Only one model was ever loaded.
+- **First-pass minutes had real misses:** a decision started with "[None] - ", tasks were repeated as decisions, and "I will send the beta invite by Wednesday" had no owner or date.
+- **Prompt tuning in `minutes.py`:**
+  - Action items now come before decisions in the schema. llama.cpp writes fields in schema order, so the tasks are claimed first and stay out of the decisions.
+  - Sharper field rules: "I will" makes the speaker the owner, due dates keep the full phrase, decisions must not repeat tasks, and typed notes count as facts.
+  - A short made-up example in the system prompt. Without safeguards the 3B model sometimes copied it into the minutes ("Update slides", "Ravi"), so `finish` now drops any item using a distinctive example word (`EXAMPLE_TERMS`) that the meeting never says.
+  - `finish` strips placeholder prefixes such as "[None] - " and "N/A:".
+- **After tuning, over 4 regenerations:** both decisions every time, all three action items every time, owners right in most runs (the speaker's label, "Hazel" when named, "You"), and no copied example content. Still imperfect: "You" is sometimes left without an owner, a due date is occasionally dropped, one run added a vague "Launch the mobile app" task, and the typed ads-budget note reaches the summary but never the decisions.
+- **Not done in the Electron window itself:** the check ran the same `TranscriptionQueue` job the app runs, from `backend/scripts/run_pipeline.py`. The minutes view and Markdown export were built and screenshot-tested earlier with fake and 0.5B minutes.
+- The 3B model is at `%APPDATA%\MinuteMind\models\llm\qwen2.5-3b-instruct-q4_k_m.gguf` (2,104,932,768 bytes), and llama-cpp-python reports GPU offload.
 
 ### Phase 5 test with the 0.5B model
 
@@ -71,7 +78,7 @@ A 42-second scripted meeting (David as "You" on the mic, Zira and Hazel on PC so
 - **Transcript fix:** Whisper's silence filter had glued all three "You" sentences (20 s apart) into one line at 0:00, so a reply appeared before the question. `transcribe.split_at_pauses` now splits lines where words are more than 1.5 s apart (`PAUSE_SPLIT_S`).
 - **Still wrong:** speaker detection over-splits the two female voices, sometimes mid-sentence, even when told there are 2 people. Look at this after Phase 5 (it may be partly an artifact of synthetic voices).
 - **0.5B minutes are poor:** tasks land under decisions and action items stay empty. Expected at this size. Don't tune the prompt against it; judge with the 3B model.
-- The test scripts (`make_clips.ps1` for the speech, `run_pipeline.py` for the run) were in the session scratchpad. Recreate them from this description if needed.
+- The test scripts now live in `backend/scripts/` (see Testing).
 
 ## Decisions made
 
@@ -112,6 +119,7 @@ A 42-second scripted meeting (David as "You" on the mic, Zira and Hazel on PC so
 
 - **Backend:** `cd backend && uv run pytest` (111 tests, one of them needs real audio devices and skips without them). `tests/conftest.py` has a `FakeRecorder` for audio hardware, a `FakeEngine` for Whisper (it can simulate the GPU running out of memory), a `FakeLanguageModel` that answers from a script, and a `FakeHardwareCache`. The API tests always inject these, so no test downloads a real model.
 - **App:** `cd app && npm run typecheck && npm run lint && npm run build`.
+- **Real-model pipeline check** (no UI, `backend/scripts/`): `make_clips.ps1` makes the seven text-to-speech lines of the launch-sync test meeting, `run_pipeline.py` builds the meeting in a scratch data folder and runs the real transcription, speaker and minutes job while logging `nvidia-smi` memory, and `regen_minutes.py [N]` rewrites the minutes N times to compare prompt changes. Link the scratch folder's `models` to the real one first (`mklink /J`), otherwise the models download again. Unlink with `rmdir` before deleting the scratch folder.
 - **UI screenshots and scripted runs**, after `npm run build`, in `app/`:
   - Every page: `MINUTEMIND_SCREENSHOT_DIR=<folder> npx electron .`
   - Plus a real recording through the UI and a playback check: add `MINUTEMIND_SCREENSHOT_RECORD=<seconds>` and `MINUTEMIND_DATA_DIR=<scratch folder>`.

@@ -39,7 +39,8 @@ MINUTES_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
-        "decisions": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_ITEMS},
+        # Action items come before decisions: the model writes fields in this
+        # order, and claiming the tasks first keeps them out of the decisions.
         "action_items": {
             "type": "array",
             "maxItems": MAX_ITEMS,
@@ -53,6 +54,7 @@ MINUTES_SCHEMA: dict = {
                 "required": ["task", "owner", "due"],
             },
         },
+        "decisions": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_ITEMS},
         "topics": {
             "type": "array",
             "maxItems": MAX_ITEMS,
@@ -63,7 +65,7 @@ MINUTES_SCHEMA: dict = {
             },
         },
     },
-    "required": ["summary", "decisions", "action_items", "topics"],
+    "required": ["summary", "action_items", "decisions", "topics"],
 }
 
 SYSTEM_PROMPT = (
@@ -71,14 +73,30 @@ SYSTEM_PROMPT = (
     "Use only what the transcript says: never invent names, numbers, dates, "
     "decisions or tasks. Keep names, figures and dates exactly as spoken. "
     'The person called "You" recorded the meeting. '
-    "Answer with JSON only."
+    "Answer with JSON only.\n\n"
+    "Here is a made-up example, only to show the form of the answer. It is not "
+    "part of any real meeting; never copy its content.\n"
+    "Example transcript:\n"
+    "[00:05] You: Should we move the demo to Thursday?\n"
+    "[00:12] Speaker 1: Yes, Thursday works. I'll update the slides by Wednesday.\n"
+    "[00:30] Ana: We're cutting the pricing section. Ravi, can you tell the client today?\n"
+    "Example answer (parts):\n"
+    '"action_items": [{"task": "Update the slides", "owner": "Speaker 1", "due": "Wednesday"}, '
+    '{"task": "Tell the client the pricing section is cut", "owner": "Ravi", "due": "today"}]\n'
+    '"decisions": ["The demo moves to Thursday", "The pricing section is cut"]\n'
+    '"topics": [{"title": "Demo date", "at": "00:05"}, {"title": "Pricing section", "at": "00:30"}]'
 )
+
+# Distinctive words from the example above. An item using one that the real
+# meeting never mentions was copied from the example and is dropped.
+EXAMPLE_TERMS = ("demo", "slides", "pricing", "ana", "ravi", "client")
 
 FIELD_GUIDE = """Fill in:
 - summary: 2 to 6 sentences on what the meeting covered and concluded.
-- decisions: each thing the group agreed or decided, as one short sentence. Use [] if nothing was decided.
-- action_items: each task someone committed to do. "task" says what will be done; "owner" is who will do it, written as in the transcript ("You" for the person who recorded), or "" if nobody was named; "due" is the deadline as said (for example "Friday" or "14 March"), or "" if none.
-- topics: the main subjects in the order discussed, each with "at", the [mm:ss] time where it starts, copied from the transcript."""
+- action_items: every task someone will do, including each "I will", "I can" or "I'll" and each task given to a named person. "task" starts with a verb and says what will be done. "owner" is the person doing it, written exactly as the speaker names above: when someone says "I will", the owner is the speaker of that line; when a task is given to someone by name, use that name. Use "" only if nobody is responsible. "due" is the deadline exactly as said, keeping the full phrase (for example "Friday the 20th" or "next Tuesday"), or "" if none was said.
+- decisions: each conclusion or agreement the group reached (what was chosen, approved, dropped or changed), as one short sentence. Do not repeat action items here. Use [] if nothing was decided.
+- topics: the main subjects in the order discussed, each with "at", the [mm:ss] time where it starts, copied from the transcript.
+Notes typed during the meeting are facts from the meeting: include any decision or task they state."""
 
 COMBINE_GUIDE = """These are minutes for consecutive parts of one meeting. Combine them into minutes for the whole meeting:
 - summary: one summary of the whole meeting, 3 to 6 sentences.
@@ -338,13 +356,14 @@ def merge_mechanically(partials: list[RawMinutes]) -> RawMinutes:
 def finish(raw: RawMinutes, ctx: MeetingContext) -> dict:
     """Tidy the model's answer into the stored form: trimmed text, duplicates
     removed, empty owners/dates as null, and topic times in milliseconds."""
-    decisions = _unique(d.strip() for d in raw.decisions)
+    copied = _copied_from_example(ctx)
+    decisions = _unique(d for d in (_strip_placeholder(d) for d in raw.decisions) if not copied(d))
     seen: set[str] = set()
     actions = []
     for item in raw.action_items:
-        task = item.task.strip()
+        task = _strip_placeholder(item.task)
         key = _key(task)
-        if not task or key in seen:
+        if not task or key in seen or copied(f"{task} {item.owner}"):
             continue
         seen.add(key)
         actions.append(
@@ -354,7 +373,7 @@ def finish(raw: RawMinutes, ctx: MeetingContext) -> dict:
     seen_topics: set[str] = set()
     for topic in raw.topics:
         title = topic.title.strip()
-        if not title or _key(title) in seen_topics:
+        if not title or _key(title) in seen_topics or copied(title):
             continue
         seen_topics.add(_key(title))
         start_ms = parse_clock(topic.at) if topic.at else None
@@ -370,6 +389,26 @@ def finish(raw: RawMinutes, ctx: MeetingContext) -> dict:
 
 
 _NONE_WORDS = {"", "none", "n/a", "na", "unknown", "unspecified", "not specified", "-", "null"}
+
+
+def _copied_from_example(ctx: MeetingContext) -> Callable[[str], bool]:
+    """A check for text that uses an example-only word the meeting never says."""
+    spoken = set(_key(" ".join([ctx.title, *ctx.people, *(l.text for l in ctx.lines), *(t for _, t in ctx.notes)])).split())
+    foreign = {term for term in EXAMPLE_TERMS if term not in spoken}
+
+    def check(text: str) -> bool:
+        return bool(foreign & set(_key(text).split()))
+
+    return check
+
+
+# A leading "[None] - ", "N/A: " and the like, which small models sometimes
+# put in front of an item.
+_PLACEHOLDER_PREFIX = re.compile(r"^\[?\s*(?:none|n/a|na|tbd|null)\s*\]?\s*[-:–—]\s*", re.IGNORECASE)
+
+
+def _strip_placeholder(text: str) -> str:
+    return _PLACEHOLDER_PREFIX.sub("", text.strip()).strip()
 
 
 def _blank_to_none(value: str) -> str | None:

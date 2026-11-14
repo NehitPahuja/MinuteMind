@@ -120,6 +120,42 @@ def test_writes_minutes_in_one_request_and_tidies_them() -> None:
     assert progress[0] == 0.0 and progress[-1] == 1.0
 
 
+def test_placeholder_prefixes_and_copied_example_items_are_dropped() -> None:
+    raw = RawMinutes(
+        summary="Launch agreed.",
+        decisions=["[None] - Launch on December 1st", "The pricing section is cut", "N/A: Drop dark mode"],
+        action_items=[
+            {"task": "Update the slides", "owner": "Speaker 1", "due": "Wednesday"},
+            {"task": "Tell the team", "owner": "Ravi", "due": "today"},
+            {"task": "Send the beta invite", "owner": "Speaker 1", "due": "Wednesday"},
+        ],
+        topics=[{"title": "Demo date", "at": "00:05"}, {"title": "Launch date", "at": "00:10"}],
+    )
+    ctx = _ctx([Line(10_000, 20_000, "Speaker 1", "We launch December 1st and drop dark mode.")])
+    result = minutes.finish(raw, ctx)
+    assert result["decisions"] == ["Launch on December 1st", "Drop dark mode"]
+    assert [a["task"] for a in result["action_items"]] == ["Send the beta invite"]
+    assert [t["title"] for t in result["topics"]] == ["Launch date"]
+
+
+def test_example_words_the_meeting_really_uses_are_kept() -> None:
+    raw = RawMinutes(
+        summary="",
+        decisions=["Pricing goes up in May"],
+        action_items=[{"task": "Prepare the demo", "owner": "Ana", "due": ""}],
+        topics=[],
+    )
+    ctx = _ctx([Line(0, 5000, "Ana", "Pricing goes up in May. I'll prepare the demo.")])
+    result = minutes.finish(raw, ctx)
+    assert result["decisions"] == ["Pricing goes up in May"]
+    assert result["action_items"] == [{"task": "Prepare the demo", "owner": "Ana", "due": None}]
+
+
+def test_action_items_are_asked_for_before_decisions() -> None:
+    order = list(minutes.MINUTES_SCHEMA["properties"])
+    assert order.index("action_items") < order.index("decisions")
+
+
 def test_retries_once_when_the_answer_is_not_valid() -> None:
     llm = FakeLanguageModel(answers=['{"summary": "cut off', json.dumps(FAKE_MINUTES)])
     result = MinutesWriter(llm).write(_ctx([Line(0, 1000, "You", "Hi.")]), GPU_PROFILE)
