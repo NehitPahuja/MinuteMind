@@ -1,7 +1,7 @@
 [project]
 name = "minutemind"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local meeting recorder, transcriber and note taker"
 readme = "README.md"
 authors = [
     { name = "sniper15867", email = "nehitpahuja@gmail.com" }

@@ -1,4 +1,4 @@
-"""Build a test meeting from TTS clips and run the real transcription + speakers + minutes job.
+r"""Build a test meeting from TTS clips and run the real transcription + speakers + minutes job.
 
 Usage, from backend/:
     powershell -File scripts/make_clips.ps1 -Out <clips dir>
