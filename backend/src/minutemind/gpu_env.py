@@ -24,9 +24,21 @@ def nvidia_bin_dirs() -> list[Path]:
     return dirs
 
 
+# The prebuilt llama.cpp CUDA library has no ready-made kernels for some GPUs
+# (an RTX 3050 among them), so the driver compiles them on first use: about
+# 3 minutes. The driver keeps the result in its compute cache, but the default
+# cache is too small to hold it, so without this every launch compiled again.
+# 4 GB is the largest size the driver accepts.
+CUDA_CACHE_BYTES = 4 * 1024**3
+
+
 def prepare() -> None:
     global _done
-    if _done or os.name != "nt":
+    if _done:
+        return
+    # Before any CUDA library loads; a value the user set wins.
+    os.environ.setdefault("CUDA_CACHE_MAXSIZE", str(CUDA_CACHE_BYTES))
+    if os.name != "nt":
         _done = True
         return
     for directory in nvidia_bin_dirs():

@@ -167,10 +167,23 @@ export class BackendManager {
 }
 
 /**
+ * Installed app: run the Python runtime shipped in resources/python (built by
+ * backend/scripts/stage_runtime.py), isolated from any Python on the PC
+ * (-E ignores PYTHON* variables, -s the user's site-packages; -u replaces
+ * PYTHONUNBUFFERED, which -E would ignore).
+ *
  * Development: run the backend from ../backend, preferring its venv python and
- * falling back to `uv run`. Packaged builds are handled in Phase 8.
+ * falling back to `uv run`.
  */
 function resolveBackendCommand(): { file: string; args: string[]; cwd: string } {
+  if (app.isPackaged) {
+    const runtime = join(process.resourcesPath, 'python')
+    const python = join(runtime, 'python.exe')
+    if (!existsSync(python)) {
+      throw new Error(`The bundled Python runtime is missing (${python}). Reinstall MinuteMind.`)
+    }
+    return { file: python, args: ['-E', '-s', '-u'], cwd: runtime }
+  }
   const backendDir = resolve(app.getAppPath(), '..', 'backend')
   if (!existsSync(join(backendDir, 'pyproject.toml'))) {
     throw new Error(`Backend project not found at ${backendDir}`)

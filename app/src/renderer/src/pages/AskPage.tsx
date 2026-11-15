@@ -14,7 +14,7 @@ const STATUS_TEXT: Record<string, string> = {
   searching: 'Searching your meetings…',
   queued: 'Waiting for the previous question…',
   waiting: 'Waiting for a transcription to finish…',
-  loading: 'Loading the AI model…',
+  loading: 'Loading the AI model… The first answer after installing can take a few minutes.',
   answering: 'Answering…'
 }
 

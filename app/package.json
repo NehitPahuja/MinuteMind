@@ -1,6 +1,6 @@
 {
   "name": "minutemind",
-  "version": "1.0.0",
+  "version": "0.6.0",
   "description": "Local meeting recorder, transcriber and note taker",
   "main": "./out/main/index.js",
   "author": "Nehit Pahuja",
@@ -14,8 +14,9 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "install-electron && electron-builder install-app-deps",
-    "build:unpack": "npm run build && electron-builder --dir",
-    "build:win": "npm run build && electron-builder --win",
+    "stage:python": "uv run --no-sync --project ../backend python ../backend/scripts/stage_runtime.py",
+    "build:unpack": "npm run build && npm run stage:python && electron-builder --win --dir",
+    "build:win": "npm run build && npm run stage:python && electron-builder --win",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux"
   },

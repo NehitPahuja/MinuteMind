@@ -1,23 +1,40 @@
 appId: com.minutemind.app
 productName: MinuteMind
+copyright: Copyright © 2026 MinuteMind
 directories:
   buildResources: build
 files:
   - '!**/.vscode/*'
   - '!src/*'
+  - '!build-python/**'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - resources/**
+# The Python backend: a standalone CPython with every dependency (CUDA
+# libraries included), staged by backend/scripts/stage_runtime.py.
+extraResources:
+  - from: build-python/python
+    to: python
+    filter:
+      - '**/*'
 win:
-  executableName: app
+  executableName: MinuteMind
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: x64
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: ${productName}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+  # About 3 GB installed, so let people pick the drive.
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
@@ -38,6 +55,5 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
+# Releases are uploaded by hand (GitHub Releases); no auto-update feed.
+publish: null
